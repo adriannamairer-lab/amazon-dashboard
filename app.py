@@ -126,6 +126,27 @@ NUMERIC_COLS = ["Spend","Sales","Orders","Daily budget","Impressions","Clicks","
 def get_url(tab_id, gid):
     return f"https://docs.google.com/spreadsheets/d/{tab_id}/export?format=csv&gid={gid}"
 
+# =================================================================================
+# === NOWA FUNKCJA POMOCNICZA DO NAPRAWY BŁĘDU BIGINT ===
+# =================================================================================
+def convert_int_columns_to_float(df):
+    """
+    Safely converts columns that might contain large integers to float64
+    to prevent the 'BigInt' error in Streamlit components.
+    """
+    # Lista kolumn, które po konwersji w `clean_numeric_columns` mogą być int64
+    potential_bigint_cols = ['Impressions', 'Clicks', 'Orders', 'Sales', 'Spend', 'Quantity', 'Units']
+    
+    for col in potential_bigint_cols:
+        if col in df.columns:
+            # Sprawdzamy, czy typ kolumny to int (np. int64)
+            if pd.api.types.is_integer_dtype(df[col]):
+                # Bezpiecznie konwertujemy na float64
+                df[col] = df[col].astype('float64')
+    return df
+# =================================================================================
+
+
 @st.cache_data
 def load_price_data():
     url = "https://docs.google.com/spreadsheets/d/1Ds_SbZ3Ilg9KbipNyj-FP0V5Bb2mZFmUWoLvRhqxDCA/export?format=csv&gid=1384320249"
@@ -701,6 +722,12 @@ with tab1:
             if "_Campaign_Standardized" in df_display_rules.columns:
                 df_display_rules.rename(columns={"_Campaign_Standardized": "Campaign"}, inplace=True)
 
+            # =================================================================================
+            # === ZASTOSOWANIE POPRAWKI #2 (DASHBOARD) ===
+            # =================================================================================
+            df_display_rules = convert_int_columns_to_float(df_display_rules)
+            # =================================================================================
+
             gb = GridOptionsBuilder.from_dataframe(df_display_rules)
             
             js_conditions = []
@@ -953,6 +980,13 @@ with tab2:
             
     if state_key in st.session_state.new_bid_data:
         display_df = st.session_state.new_bid_data[state_key]
+        
+        # =================================================================================
+        # === ZASTOSOWANIE POPRAWKI #2 (NEW BID) ===
+        # =================================================================================
+        display_df = convert_int_columns_to_float(display_df)
+        # =================================================================================
+
         st.dataframe(display_df, use_container_width=True, hide_index=True)
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
@@ -1095,11 +1129,11 @@ with tab4:
                     else:
                         try:
                             uploaded_file.seek(0)
-                            df_upload = pd.read_csv(uploaded_file, sep=';')
+                            df_upload = pd.read_csv(uploaded_file, sep=';', dtype=str)
                             if df_upload.shape[1] < 2: raise ValueError("Niepoprawny separator")
                         except (Exception, pd.errors.ParserError):
                             uploaded_file.seek(0)
-                            df_upload = pd.read_csv(uploaded_file, sep=',')
+                            df_upload = pd.read_csv(uploaded_file, sep=',', dtype=str)
                     
                     final_rules_df = df_upload.copy()
                     if 'name' not in final_rules_df.columns:
