@@ -350,7 +350,7 @@ def load_all_product_data():
     failed_reports = []
     for report in reports_to_load:
         try:
-            df_temp = pd.read_csv(get_url(report['tab_id'], report['gid']), low_memory=False)
+            df_temp = pd.read_csv(get_url(report['tab_id'], report['gid']), low_memory=False, dtype=str)
             found_cols = {std: find_first_existing_column(df_temp, poss) for std, poss in COLUMN_MAPPING.items()}
             
             if not found_cols['campaign'] or not (found_cols['sku'] or found_cols['asin']):
@@ -540,9 +540,9 @@ with tab1:
         df_w_raw, df_m_raw = None, None
         try:
             if okres in ["Tydzień", "Porównanie"] and gid_w and tab_id:
-                df_w_raw = pd.read_csv(get_url(tab_id, gid_w))
+                df_w_raw = pd.read_csv(get_url(tab_id, gid_w), dtype=str)
             if okres in ["Miesiąc", "Porównanie"] and gid_m and tab_id:
-                df_m_raw = pd.read_csv(get_url(tab_id, gid_m))
+                df_m_raw = pd.read_csv(get_url(tab_id, gid_m), dtype=str)
         except Exception as e:
             st.error(f"Błąd ładowania danych źródłowych: {e}")
 
