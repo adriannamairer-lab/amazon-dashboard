@@ -36,7 +36,8 @@ if 'manual_bid_updates' not in st.session_state:
     st.session_state.manual_bid_updates = None
 if 'new_bid_data' not in st.session_state:
     st.session_state.new_bid_data = {}
-
+if 'bulk_bid_change' not in st.session_state:
+    st.session_state.bulk_bid_change = {} # Słownik do przechowywania zmian % per widok
 # --- KONIEC ---
 
 
@@ -121,38 +122,31 @@ if 'selected_account' not in st.session_state:
 NUMERIC_COLS = ["Spend","Sales","Orders","Daily budget","Impressions","Clicks","CTR", "CR", "Bid","Bid_new","Price","Quantity","ACOS","CPC","ROAS","Units"]
 
 
+# --- MAPOWANIE KRAJÓW ---
+KRAJ_CODE_MAP = {
+    "Niemcy": "DE",
+    "Włochy": "IT",
+    "Francja": "FR",
+    "Hiszpania": "ES",
+    "Holandia": "NL",
+    "Belgia": "BE",
+    "Polska": "PL"
+    # Dodaj UK jeśli jest potrzebne
+    # "UK": "UK"
+}
+
+
 # --- HELPER FUNCTIONS ---
 
 def get_url(tab_id, gid):
     return f"https://docs.google.com/spreadsheets/d/{tab_id}/export?format=csv&gid={gid}"
-
-# =================================================================================
-# === NOWA FUNKCJA POMOCNICZA DO NAPRAWY BŁĘDU BIGINT ===
-# =================================================================================
-def convert_int_columns_to_float(df):
-    """
-    Safely converts columns that might contain large integers to float64
-    to prevent the 'BigInt' error in Streamlit components.
-    """
-    # Lista kolumn, które po konwersji w `clean_numeric_columns` mogą być int64
-    potential_bigint_cols = ['Impressions', 'Clicks', 'Orders', 'Sales', 'Spend', 'Quantity', 'Units']
-    
-    for col in potential_bigint_cols:
-        if col in df.columns:
-            # Sprawdzamy, czy typ kolumny to int (np. int64)
-            if pd.api.types.is_integer_dtype(df[col]):
-                # Bezpiecznie konwertujemy na float64
-                df[col] = df[col].astype('float64')
-    return df
-# =================================================================================
-
 
 @st.cache_data
 def load_price_data():
     url = "https://docs.google.com/spreadsheets/d/1Ds_SbZ3Ilg9KbipNyj-FP0V5Bb2mZFmUWoLvRhqxDCA/export?format=csv&gid=1384320249"
     try:
         df = pd.read_csv(url, header=0, dtype=str)
-        
+
         # 1. Price and Name
         if df.shape[1] < 3:
             st.warning("Arkusz cen nie ma wystarczającej liczby kolumn do pobrania cen i nazw produktów.")
@@ -174,18 +168,147 @@ def load_price_data():
 
         # Łączenie
         final_df = pd.merge(price_name_map_df, qty_map_df, on='SKU', how='left')
-        
+
         # Konwersja
         final_df['Price'] = pd.to_numeric(final_df['Price'].astype(str).str.replace(',', '.'), errors='coerce')
         final_df['Quantity'] = pd.to_numeric(final_df['Quantity'], errors='coerce')
         final_df['Nazwa produktu'] = final_df['Nazwa produktu'].astype(str).fillna('')
-        
+
         final_df = final_df.drop_duplicates(subset=['SKU'], keep='first')
         return final_df
 
     except Exception as e:
         st.error(f"Błąd podczas ładowania danych o cenach: {e}")
         return pd.DataFrame(columns=['SKU', 'Price', 'Quantity', 'Nazwa produktu'])
+
+
+@st.cache_data
+def load_product_details():
+    """
+    Ładuje szczegóły produktu (nazwa, marka, kategoria, ID, SKU, ASIN) z centralnego arkusza Google.
+    Poprawka: Wczytuje kolumnę 'ID' z arkusza i używa jej jako 'ID' oraz 'SKU' w aplikacji, zgodnie z mapowaniem użytkownika.
+    """
+    url = "https://docs.google.com/spreadsheets/d/1ywoA6ZgmrPa-CUdZGbkhgp8y6ryMCCDgBgEFfvKJbPc/export?format=csv&gid=0"
+    try:
+        # 1. Zmienione use_cols - wczytujemy kolumny, które istnieją w arkuszu.
+        # (Usunięto 'SKU', ponieważ w arkuszu nazywa się 'ID')
+        use_cols = ['ID', 'ASIN', 'Nazwa', 'Marka', 'Kategoria']
+        df = pd.read_csv(url, usecols=use_cols, dtype=str, header=0)
+
+        # 2. Czyszczenie wczytanych danych
+        # Kolumna 'ID' z arkusza to nasz klucz (i jednocześnie SKU)
+        df['ID'] = df['ID'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        df['ASIN'] = df['ASIN'].astype(str).str.strip()
+
+        # 3. Utworzenie kolumny 'SKU' na podstawie kolumny 'ID' (zgodnie z "ID (czyli sku)")
+        df['SKU'] = df['ID']
+
+        # 4. Zmieniamy nazwy kolumn na te, których oczekuje reszta aplikacji (małe litery)
+        df.rename(columns={
+            'Kategoria': 'kategoria',
+            'Marka': 'marka',
+            'Nazwa': 'nazwa'
+            # ID, SKU, ASIN już mają poprawne nazwy lub zostały utworzone
+        }, inplace=True)
+
+        # 5. Wypełnianie brakujących danych pustym stringiem
+        df['kategoria'] = df['kategoria'].fillna('')
+        df['marka'] = df['marka'].fillna('')
+        df['nazwa'] = df['nazwa'].fillna('')
+        df['SKU'] = df['SKU'].fillna('')
+        df['ASIN'] = df['ASIN'].fillna('')
+        df['ID'] = df['ID'].fillna('')
+
+        # 6. Usuwanie duplikatów po ID (który jest naszym kluczem głównym)
+        df.drop_duplicates(subset=['ID'], keep='first', inplace=True)
+
+        # 7. Zwracamy DataFrame z wszystkimi wymaganymi kolumnami
+        # Upewnijmy się, że kolejność jest poprawna dla reszty kodu
+        return df[['ID', 'SKU', 'ASIN', 'nazwa', 'marka', 'kategoria']]
+
+    except Exception as e:
+        # Zaktualizowany komunikat o błędzie
+        st.error(f"Błąd podczas ładowania szczegółów produktów: {e}. Sprawdź, czy arkusz pod adresem '{url.replace('/export?format=csv&gid=0','')}' jest poprawnie udostępniony ('Każda osoba mająca link') i czy zawiera kolumny: 'ID', 'ASIN', 'Nazwa', 'Marka', 'Kategoria'.")
+        # Zwracamy pusty DataFrame z oczekiwanymi (docelowymi) kolumnami w razie błędu
+        return pd.DataFrame(columns=['ID', 'SKU', 'ASIN', 'nazwa', 'marka', 'kategoria'])
+
+
+    except Exception as e:
+        st.error(f"Błąd podczas ładowania szczegółów produktów: {e}. Sprawdź, czy arkusz pod adresem '{url.replace('/export?format=csv&gid=0','')}' jest poprawnie udostępniony ('Każda osoba mająca link') i czy zawiera kolumny 'Kategoria', 'Marka', 'Nazwa', 'ID', 'SKU', 'ASIN'.")
+        # Zwracamy pusty DataFrame z oczekiwanymi (docelowymi) kolumnami w razie błędu
+        return pd.DataFrame(columns=['ID', 'SKU', 'ASIN', 'nazwa', 'marka', 'kategoria'])
+
+
+
+# <--- POCZĄTEK POPRAWIONEJ FUNKCJI ---
+# PODMIEŃ CAŁĄ TĘ FUNKCJĘ W SWOIM KODZIE
+@st.cache_data
+def load_total_sales_and_orders(okres, country_code):
+    """
+    Ładuje dane o całkowitej sprzedaży i zamówieniach z oddzielnego arkusza Google.
+    Używa poprawnych nazw kolumn: 'Amazon store', 'MSKU', 'Sales', 'Units sold'.
+    Dodano debugowanie przed agregacją.
+    """
+    urls = {
+        "Tydzień": "https://docs.google.com/spreadsheets/d/1ywoA6ZgmrPa-CUdZGbkhgp8y6ryMCCDgBgEFfvKJbPc/export?format=csv&gid=1591650234",
+        "Miesiąc": "https://docs.google.com/spreadsheets/d/1ywoA6ZgmrPa-CUdZGbkhgp8y6ryMCCDgBgEFfvKJbPc/export?format=csv&gid=1990490485"
+    }
+
+    url = urls.get(okres)
+    if not url:
+        return pd.DataFrame(columns=['ID', 'Total Sales (Total)', 'Total Orders (Total)'])
+
+    try:
+        df = pd.read_csv(url, dtype=str)
+        
+        required_cols = ['Amazon store', 'MSKU', 'Sales', 'Units sold']
+        if not all(col in df.columns for col in required_cols):
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            st.warning(f"Brak wymaganych kolumn w pliku 'Total Sales' dla okresu {okres}. Brakujące: {', '.join(missing_cols)}. Kontynuuję bez tych danych.")
+            return pd.DataFrame(columns=['ID', 'Total Sales (Total)', 'Total Orders (Total)'])
+
+        # --- Filtracja po kraju ---
+        if 'Amazon store' not in df.columns:
+             st.warning(f"Brak kolumny 'Amazon store' w pliku Total Sales ({okres}) do filtrowania kraju.")
+             return pd.DataFrame(columns=['ID', 'Total Sales (Total)', 'Total Orders (Total)'])
+
+        df_country = df[df['Amazon store'].str.upper() == country_code.upper()].copy()
+
+        if df_country.empty:
+            
+            return pd.DataFrame(columns=['ID', 'Total Sales (Total)', 'Total Orders (Total)'])
+
+        # --- Konwersje i czyszczenie ---
+        sales_str = df_country['Sales'].astype(str)
+        sales_str_cleaned = sales_str.str.replace('.', '', regex=False).str.replace(',', '.')
+        df_country['Sales_numeric'] = pd.to_numeric(sales_str_cleaned, errors='coerce').fillna(0) # Nowa kolumna tymczasowa
+
+        df_country['Units_sold_numeric'] = pd.to_numeric(df_country['Units sold'], errors='coerce').fillna(0) # Nowa kolumna tymczasowa
+
+        df_country['MSKU_cleaned'] = df_country['MSKU'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip() # Nowa kolumna tymczasowa
+
+        
+        # --- Agregacja używa nowych, numerycznych kolumn i oczyszczonego MSKU ---
+        aggregated_df = df_country.groupby('MSKU_cleaned').agg(
+            Total_Sales_Total=('Sales_numeric', 'sum'), # Używamy _numeric
+            Total_Orders_Total=('Units_sold_numeric', 'sum') # Używamy _numeric
+        ).reset_index()
+
+        # Zmiana nazwy kolumny klucza
+        aggregated_df.rename(columns={
+            'MSKU_cleaned': 'ID', # Używamy _cleaned
+            'Total_Sales_Total': 'Total Sales (Total)',
+            'Total_Orders_Total': 'Total Orders (Total)'
+        }, inplace=True)
+
+        return aggregated_df
+
+    except Exception as e:
+        st.error(f"Krytyczny błąd podczas ładowania danych Total Sales/Orders dla {okres} ({country_code}): {e}")
+        
+        return pd.DataFrame(columns=['ID', 'Total Sales (Total)', 'Total Orders (Total)'])
+
+# <--- KONIEC POPRAWIONEJ FUNKCJI ---
 
 
 def save_rules_to_file(rules, filepath="rules.json"):
@@ -198,13 +321,23 @@ def clean_numeric_columns(df):
     for c in NUMERIC_COLS:
         if c == "Price (DE)" or c not in df_clean.columns:
             continue
+        # Pierwsze czyszczenie - usuwanie spacji i zamiana przecinka na kropkę
         cleaned_series = df_clean[c].astype(str).str.replace(" ", "", regex=False).str.replace(",", ".", regex=False)
+
+        # Dodatkowe czyszczenie dla kolumn procentowych - usuwanie '%'
         if any(metric in c for metric in ["ACOS", "CTR", "CR"]):
             cleaned_series = cleaned_series.str.replace("%", "", regex=False)
+
+        # Konwersja na typ numeryczny, błędy zamieniane na NaN
         numeric_series = pd.to_numeric(cleaned_series, errors='coerce')
+
+        # Specjalna obsługa kolumn procentowych - dzielenie przez 100, jeśli wartości są > 1
         if any(metric in c for metric in ["ACOS", "CTR", "CR"]):
+            # Sprawdzenie, czy seria nie jest pusta, czy zawiera jakiekolwiek liczby i czy maksymalna wartość jest większa niż 1
             if not numeric_series.empty and pd.notna(numeric_series).any() and numeric_series.max() > 1:
-                numeric_series /= 100
+                numeric_series /= 100 # Podziel przez 100
+
+        # Przypisanie wyczyszczonej i przekonwertowanej serii z powrotem do DataFrame
         df_clean[c] = numeric_series
     return df_clean
 
@@ -212,34 +345,34 @@ def apply_rules_to_bids_vectorized(df, rules):
     df = df.copy()
     if "Bid" not in df.columns or not rules:
         return df, 0
-    
+
     bid_loc = df.columns.get_loc("Bid")
     if "Bid_new" not in df.columns:
         df.insert(bid_loc + 1, "Bid_new", df["Bid"])
     else:
         df["Bid_new"] = df["Bid"]
-        
+
     bid_rules_list = [r for r in rules if r.get('type') == 'Bid' and r.get('name')]
     if not bid_rules_list:
         return df, 0
-        
+
     rules_df = pd.DataFrame(bid_rules_list)
-    
+
     unique_rule_names = rules_df['name'].unique()
-    
+
     bids_changed_mask = pd.Series(False, index=df.index)
     condition_map = {"Większe niż": ">", "Mniejsze niż": "<", "Równe": "="}
     metrics_as_percent = ["ACOS", "CTR", "CR"]
 
     for name in unique_rule_names:
         group = rules_df[rules_df['name'] == name]
-        
+
         change_value = group['change'].iloc[0]
         if pd.isna(change_value):
             continue
-            
+
         group_mask = pd.Series(True, index=df.index)
-        
+
         for _, condition_row in group.iterrows():
             metric = condition_row.get("metric")
             condition_text = condition_row.get("condition")
@@ -248,37 +381,46 @@ def apply_rules_to_bids_vectorized(df, rules):
 
             if not all([metric, op, rule_value is not None]) or metric not in df.columns:
                 group_mask = pd.Series(False, index=df.index)
-                break 
+                break
 
             row_values = df[metric].fillna(0)
-            rule_value_conv = float(rule_value) / 100.0 if metric in metrics_as_percent else float(rule_value)
-            
+            try:
+                rule_value_float = float(rule_value)
+                rule_value_conv = rule_value_float / 100.0 if metric in metrics_as_percent else rule_value_float
+            except (ValueError, TypeError):
+                # Jeśli wartość nie jest liczbą, pomiń ten warunek (lub całą regułę?)
+                # Na razie pomijamy warunek - załóżmy, że jest spełniony, aby nie blokować AND
+                continue
+
+
             condition_mask = pd.Series(False, index=df.index)
             if op == '>': condition_mask = row_values.gt(rule_value_conv)
             elif op == '<': condition_mask = row_values.lt(rule_value_conv)
             elif op == '=': condition_mask = row_values.eq(rule_value_conv)
-            
+
             group_mask &= condition_mask
-        
+
         if not group_mask.any():
             continue
 
         mask_to_apply = group_mask & ~bids_changed_mask & df['Bid'].notna() & (df['Bid'] > 0)
-        
+
         if not mask_to_apply.any():
             continue
 
         try:
             multiplier = 1 + (float(change_value) / 100.0)
             if multiplier < 0: multiplier = 0
+            # Użyj .loc do bezpiecznego przypisania wartości
             df.loc[mask_to_apply, "Bid_new"] = df.loc[mask_to_apply, "Bid"] * multiplier
             bids_changed_mask.loc[mask_to_apply] = True
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            st.error(f"Błąd przy obliczaniu nowej stawki dla reguły '{name}': {e}")
             continue
-            
+
     if "Bid_new" in df.columns:
         df['Bid_new'] = df['Bid_new'].round(2)
-        
+
     num_changed = int(bids_changed_mask.sum())
     return df, num_changed
 
@@ -286,7 +428,6 @@ def infer_targeting_from_name(campaign_name):
     if not isinstance(campaign_name, str): return "Manual"
     return "Auto" if "AUTO" in campaign_name.upper() else "Manual"
 
-# <--- ZMIANA: Ulepszona funkcja wyszukująca kolumny, ignorująca wielkość liter i spacje
 def find_first_existing_column(df, potential_names):
     df_cols_cleaned = {col.lower().strip(): col for col in df.columns}
     for name in potential_names:
@@ -298,89 +439,123 @@ def find_first_existing_column(df, potential_names):
 def process_loaded_data(df_raw, typ_kampanii_arg):
     if df_raw is None or df_raw.empty:
         return pd.DataFrame()
-    
+
     df = df_raw.copy()
-    
-    # <--- ZMIANA: Rozszerzona lista potencjalnych nazw dla kolumny kampanii
+
     POTENTIAL_CAMPAIGN_COLS = ["Campaign name (Informational only)", "Campaign Name (Informational only)", "Campaign name", "Campaign Name", "Campaign"]
-    
+
     sku_col_options = ["SKU", "Advertised SKU"]
     asin_col_options = ["ASIN (Informational only)", "Advertised ASIN", "ASIN"]
-    
+
     found_sku_col = find_first_existing_column(df, sku_col_options)
     if found_sku_col:
         df[found_sku_col] = df[found_sku_col].fillna('').astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         if found_sku_col != 'SKU':
             df.rename(columns={found_sku_col: 'SKU'}, inplace=True)
-            
+
     found_asin_col = find_first_existing_column(df, asin_col_options)
     if found_asin_col:
         df[found_asin_col] = df[found_asin_col].fillna('').astype(str).str.strip()
         if found_asin_col != 'ASIN':
             df.rename(columns={found_asin_col: 'ASIN'}, inplace=True)
-            
+
     df = clean_numeric_columns(df)
-    
+
     if 'Spend' in df.columns and 'Sales' in df.columns:
-        df['ACOS'] = np.where(df['Sales'] > 0, df['Spend'] / df['Sales'], 0)
-    
+        # Użyj .loc, aby uniknąć SettingWithCopyWarning
+        df.loc[:, 'ACOS'] = np.where(df['Sales'] > 0, df['Spend'] / df['Sales'], 0)
+
+
     STANDARDIZED_CAMPAIGN_COL = "_Campaign_Standardized"
     actual_campaign_col = find_first_existing_column(df, POTENTIAL_CAMPAIGN_COLS)
     if actual_campaign_col:
         df.rename(columns={actual_campaign_col: STANDARDIZED_CAMPAIGN_COL}, inplace=True)
-    
+
     if 'Clicks' in df.columns and 'Impressions' in df.columns and 'CTR' not in df.columns:
-        df['CTR'] = np.where(df['Impressions'] > 0, df['Clicks'] / df['Impressions'], 0)
-    
+         df.loc[:, 'CTR'] = np.where(df['Impressions'] > 0, df['Clicks'] / df['Impressions'], 0)
+
+
     if 'Clicks' in df.columns and 'Orders' in df.columns:
-        df['CR'] = np.where(df['Clicks'] > 0, df['Orders'] / df['Clicks'], 0)
+        # Sprawdź, czy kolumna CR już istnieje
+        if 'CR' not in df.columns:
+            df.loc[:, 'CR'] = np.where(df['Clicks'] > 0, df['Orders'] / df['Clicks'], 0)
+
 
     if STANDARDIZED_CAMPAIGN_COL in df.columns:
-        df["Targeting type"] = df[STANDARDIZED_CAMPAIGN_COL].apply(infer_targeting_from_name)
-    
+        # Użyj .loc, aby uniknąć SettingWithCopyWarning
+        df.loc[:, "Targeting type"] = df[STANDARDIZED_CAMPAIGN_COL].apply(infer_targeting_from_name)
+
+
     df['Campaign Type'] = typ_kampanii_arg
-        
+
     return df
+
+# PODMIEŃ CAŁĄ TĘ FUNKCJĘ
 
 @st.cache_data
 def load_all_product_data():
     POTENTIAL_CAMPAIGN_NAMES = ["Campaign name (Informational only)", "Campaign Name (Informational only)", "Campaign name", "Campaign Name", "Campaign"]
     all_dfs, COLUMN_MAPPING, reports_to_load = [], {
-        'campaign': POTENTIAL_CAMPAIGN_NAMES, 
+        'campaign': POTENTIAL_CAMPAIGN_NAMES,
         'sku': ["SKU", "Advertised SKU"],
         'asin': ["ASIN (Informational only)", "Advertised ASIN", "ASIN"]
     }, []
-    
+
     for account, kraje_mapa in ACCOUNTS_DATA.items():
         for country, settings in kraje_mapa.items():
-            gids_map = {"Sponsored Products": (settings.get("SP_TYDZIEN"), settings.get("SP_MIESIAC")), "Sponsored Brands": (settings.get("SB_TYDZIEN"), settings.get("SB_MIESIAC")), "Sponsored Display": (settings.get("SD_TYDZIEN"), settings.get("SD_MIESIAC"))}
+            
+            # --- POPRAWKA TUTAJ ---
+            # Dodano "AK" (Auto Keyword) do mapy GIDów, które przeszukujemy
+            gids_map = {
+                "Sponsored Products": (settings.get("SP_TYDZIEN"), settings.get("SP_MIESIAC")),
+                "Sponsored Brands": (settings.get("SB_TYDZIEN"), settings.get("SB_MIESIAC")),
+                "Sponsored Display": (settings.get("SD_TYDZIEN"), settings.get("SD_MIESIAC")),
+                "Auto Keyword": (settings.get("AK_TYDZIEN"), settings.get("AK_MIESIAC")) # <-- Dodana linia
+            }
+            # --- KONIEC POPRAWKI ---
+            
             for camp_type, gids in gids_map.items():
                 for gid in gids:
-                    if gid: 
+                    if gid and gid != 'nan' and str(gid).strip(): # Dodatkowe sprawdzenie GID
                         reports_to_load.append({
-                            'account': account, 
-                            'country': country, 
-                            'gid': gid, 
-                            'tab_id': settings["tab_id"], 
-                            'campaign_type': camp_type
+                            'account': account,
+                            'country': country,
+                            'gid': str(gid).strip(), # Upewnij się, że GID jest stringiem
+                            'tab_id': settings["tab_id"],
+                            'campaign_type': camp_type if camp_type != "Auto Keyword" else "Sponsored Products" # Raporty AK to też SP
                         })
 
-    if not reports_to_load: 
+    if not reports_to_load:
+        st.warning("Nie znaleziono żadnych poprawnych GID do załadowania danych produktów.")
         return pd.DataFrame()
 
     failed_reports = []
+    successful_loads = 0
     for report in reports_to_load:
         try:
-            df_temp = pd.read_csv(get_url(report['tab_id'], report['gid']), low_memory=False, dtype=str)
+            url = get_url(report['tab_id'], report['gid'])
+            df_temp = pd.read_csv(url, low_memory=False)
+            successful_loads += 1 # Zlicz udane wczytania
             found_cols = {std: find_first_existing_column(df_temp, poss) for std, poss in COLUMN_MAPPING.items()}
-            
-            if not found_cols['campaign'] or not (found_cols['sku'] or found_cols['asin']):
+
+            # Sprawdź, czy znaleziono kolumnę kampanii ORAZ przynajmniej SKU lub ASIN
+            if not found_cols.get('campaign') or not (found_cols.get('sku') or found_cols.get('asin')):
+                # Można dodać ostrzeżenie, jeśli potrzebne
+                # st.warning(f"Skipping report {report['gid']} for {report['country']} - no SKU/ASIN found.")
                 continue
 
             df_small_data = {}
-            for std, act in found_cols.items():
-                if act: 
-                    df_small_data[std.capitalize()] = df_temp[act]
+            # Użyj znalezionych nazw kolumn, aby pobrać dane
+            for std_name, actual_name in found_cols.items():
+                if actual_name: # Tylko jeśli kolumna została znaleziona
+                    df_small_data[std_name.capitalize()] = df_temp[actual_name]
+
+            # Jeśli brakuje Sku lub Asin, ale druga kolumna istnieje, dodaj pustą kolumnę
+            if 'Sku' not in df_small_data and 'Asin' in df_small_data:
+                 df_small_data['Sku'] = pd.Series([None] * len(df_temp))
+            elif 'Asin' not in df_small_data and 'Sku' in df_small_data:
+                 df_small_data['Asin'] = pd.Series([None] * len(df_temp))
+
 
             df_small = pd.DataFrame(df_small_data)
             df_small["Account"] = report['account']
@@ -389,59 +564,255 @@ def load_all_product_data():
             all_dfs.append(df_small)
         except Exception as e:
             failed_reports.append(f"Konto: {report['account']}, Kraj: {report['country']}, Arkusz: {report['tab_id']}, GID: {report['gid']} - Błąd: {e}")
-    
+
+    # Wyświetl podsumowanie ładowania tylko jeśli były jakieś próby
+    if reports_to_load:
+         st.info(f"Próbowano załadować {len(reports_to_load)} raportów produktowych. Udane: {successful_loads}. Nieudane: {len(failed_reports)}.")
+
+
     if failed_reports:
-        with st.expander("⚠️ Wystąpiły problemy podczas ładowania niektórych danych (kliknij, aby rozwinąć)"):
+        with st.expander("⚠️ Wystąpiły problemy podczas ładowania niektórych danych produktowych (kliknij, aby rozwinąć)"):
             for failure in failed_reports:
                 st.error(failure)
-                
-    if not all_dfs: 
+
+    if not all_dfs:
+        st.error("Nie udało się załadować żadnych danych produktowych.")
         return pd.DataFrame()
 
     master_df = pd.concat(all_dfs, ignore_index=True)
     for col in ['Sku', 'Asin']:
-        if col in master_df.columns: 
-            master_df[col] = master_df[col].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
-            
+        if col in master_df.columns:
+            master_df[col] = master_df[col].astype(str).str.replace(r"\.0$", "", regex=True).str.strip().fillna('') # Dodano fillna('')
+
     if 'Campaign' in master_df.columns:
         master_df['Targeting Type'] = master_df['Campaign'].apply(infer_targeting_from_name)
-    
+
     return master_df.fillna("")
+
+
 
 @st.cache_data
 def build_dynamic_product_map():
     report_data = load_all_product_data()
-    if 'Sku' not in report_data.columns or 'Asin' not in report_data.columns:
-        if 'Sku' not in report_data.columns or 'Asin' not in report_data.columns:
-             return pd.DataFrame()
 
-    product_map = report_data[['Account', 'Sku', 'Asin', 'Campaign', 'Campaign Type', 'Targeting Type', 'Country']].copy()
-    product_map.rename(columns={'Sku': 'SKU', 'Asin': 'ASIN'}, inplace=True)
-    product_map.dropna(subset=['SKU', 'ASIN'], inplace=True)
-    product_map = product_map[(product_map['SKU'].str.strip() != '') & (product_map['ASIN'].str.strip() != '')]
-    
-    product_map.drop_duplicates(subset=['Account', 'SKU', 'ASIN'], keep='last', inplace=True)
+    # Sprawdzenie, czy kluczowe kolumny istnieją po załadowaniu
+    if report_data.empty or ('Sku' not in report_data.columns and 'Asin' not in report_data.columns):
+         st.error("Nie można zbudować mapy produktów - brak danych Sku lub Asin w załadowanych raportach.")
+         # Zwróć pusty DataFrame z oczekiwanymi kolumnami, aby uniknąć błędów dalej
+         return pd.DataFrame(columns=['Account', 'SKU', 'ASIN', 'Campaign', 'Campaign Type', 'Targeting Type', 'Country'])
 
+
+    # Stwórz kolumny Sku/Asin jeśli ich brakuje
+    if 'Sku' not in report_data.columns:
+        report_data['Sku'] = ''
+    if 'Asin' not in report_data.columns:
+        report_data['Asin'] = ''
+
+
+    # Upewnij się, że wszystkie potrzebne kolumny istnieją przed ich wybraniem
+    required_cols = ['Account', 'Sku', 'Asin', 'Campaign', 'Campaign Type', 'Targeting Type', 'Country']
+    available_cols = [col for col in required_cols if col in report_data.columns]
+
+    if not available_cols:
+         st.error("Nie można zbudować mapy produktów - brak wymaganych kolumn w załadowanych danych.")
+         return pd.DataFrame(columns=required_cols)
+
+
+    product_map = report_data[available_cols].copy()
+    product_map.rename(columns={'Sku': 'SKU', 'Asin': 'ASIN'}, inplace=True) # Zmień nazwę nawet jeśli nie było 'Sku'
+
+
+    # Czyszczenie i usuwanie pustych wierszy
+    if 'SKU' in product_map.columns:
+         product_map['SKU'] = product_map['SKU'].astype(str).str.strip()
+    else:
+         product_map['SKU'] = '' # Upewnij się, że kolumna istnieje
+
+    if 'ASIN' in product_map.columns:
+         product_map['ASIN'] = product_map['ASIN'].astype(str).str.strip()
+    else:
+         product_map['ASIN'] = '' # Upewnij się, że kolumna istnieje
+
+
+    # Usuń wiersze, gdzie zarówno SKU jak i ASIN są puste
+    product_map.dropna(subset=['SKU', 'ASIN'], how='all', inplace=True)
+    product_map = product_map[(product_map['SKU'] != '') | (product_map['ASIN'] != '')]
+
+
+    # Usuwanie duplikatów
+    # Sprawdź, czy kolumny istnieją przed użyciem ich w subset
+    duplicate_subset = [col for col in ['Account', 'SKU', 'ASIN'] if col in product_map.columns]
+    if duplicate_subset:
+         product_map.drop_duplicates(subset=duplicate_subset, keep='last', inplace=True)
+
+    # Łączenie z danymi cenowymi
     price_data = load_price_data()
-    if not price_data.empty:
+    if not price_data.empty and 'SKU' in product_map.columns and 'SKU' in price_data.columns:
         product_map = pd.merge(
             product_map,
-            price_data,
+            price_data[['SKU', 'Price', 'Quantity', 'Nazwa produktu']].drop_duplicates(subset=['SKU']), # Upewnij się, że klucze są unikalne
             on='SKU',
             how='left'
         )
+        # Wypełnij NaN po merge
+        if 'Price' in product_map.columns: product_map['Price'] = product_map['Price'].fillna(0)
+        if 'Quantity' in product_map.columns: product_map['Quantity'] = product_map['Quantity'].fillna(0)
+        if 'Nazwa produktu' in product_map.columns: product_map['Nazwa produktu'] = product_map['Nazwa produktu'].fillna('')
+
+    elif 'SKU' not in product_map.columns:
+         st.warning("Nie można połączyć danych cenowych - brak kolumny SKU w mapie produktów.")
+
+
+    # Upewnij się, że kolumny 'Nazwa produktu', 'Price', 'Quantity' istnieją, nawet jeśli merge się nie powiódł
+    if 'Nazwa produktu' not in product_map.columns: product_map['Nazwa produktu'] = ''
+    if 'Price' not in product_map.columns: product_map['Price'] = 0.0
+    if 'Quantity' not in product_map.columns: product_map['Quantity'] = 0
+
+
     return product_map
 
-# <--- ZMIANA: Ta funkcja została zabezpieczona przed zwracaniem krotki (tuple)
+
 @st.cache_data
 def load_search_data():
     data = build_dynamic_product_map()
     if isinstance(data, pd.DataFrame):
         return data
     elif isinstance(data, tuple) and len(data) > 0 and isinstance(data[0], pd.DataFrame):
-        return data[0]
+         # Ta część wydaje się być zabezpieczeniem przed cache zwracającym krotkę
+         return data[0]
+
     else:
+        st.error("load_search_data otrzymało nieoczekiwany typ danych.")
+        return pd.DataFrame() # Zwróć pusty DataFrame w razie problemu
+
+
+# <--- ZAKTUALIZOWANA FUNKCJA ---
+@st.cache_data
+def load_and_aggregate_by_sku(account, country, okres):
+    """
+    Ładuje wszystkie dane (SP, SB, SD, Tydzień, Miesiąc) dla danego konta i kraju,
+    agreguje Spend i Sales po SKU, a następnie dołącza szczegóły produktu ORAZ
+    dane o całkowitej sprzedaży i zamówieniach.
+    Filtruje dane na podstawie wybranego okresu ('Tydzień' lub 'Miesiąc').
+    """
+    KRAJE_MAPA = ACCOUNTS_DATA.get(account)
+    if not KRAJE_MAPA:
         return pd.DataFrame()
+
+    settings = KRAJE_MAPA.get(country)
+    if not settings:
+        return pd.DataFrame()
+
+    tab_id = settings.get("tab_id")
+    if not tab_id:
+        return pd.DataFrame()
+
+    if okres == "Tydzień":
+        gid_keys = ["SP_TYDZIEN", "SB_TYDZIEN", "SD_TYDZIEN", "AK_TYDZIEN"]
+    elif okres == "Miesiąc":
+        gid_keys = ["SP_MIESIAC", "SB_MIESIAC", "SD_MIESIAC", "AK_MIESIAC"]
+    else:
+        gid_keys = []
+    
+    all_dfs = []
+    
+    for key in gid_keys: 
+        gid = settings.get(key)
+        if gid:
+            try:
+                df_raw = pd.read_csv(get_url(tab_id, gid), low_memory=False)
+                df_processed = process_loaded_data(df_raw, "Aggregated") 
+                
+                if 'SKU' in df_processed.columns and 'Spend' in df_processed.columns and 'Sales' in df_processed.columns:
+                    df_temp = df_processed[['SKU', 'Spend', 'Sales']].copy()
+                    all_dfs.append(df_temp)
+            except Exception as e:
+                
+                pass
+    
+    if not all_dfs:
+        return pd.DataFrame()
+
+    master_df = pd.concat(all_dfs, ignore_index=True)
+    master_df.dropna(subset=['SKU', 'Spend', 'Sales'], inplace=True)
+    master_df = master_df[master_df['SKU'].str.strip().ne('')]
+    
+    if master_df.empty:
+        return pd.DataFrame()
+
+    # Agregacja danych reklamowych
+    aggregated_df = master_df.groupby('SKU').agg(
+        Total_Spend=('Spend', 'sum'),
+        Total_Sales=('Sales', 'sum')
+    ).reset_index()
+
+    # Obliczenie ACOS
+    aggregated_df['ACOS'] = np.where(
+        aggregated_df['Total_Sales'] > 0,
+        aggregated_df['Total_Spend'] / aggregated_df['Total_Sales'],
+        0
+    )
+    
+    aggregated_df.rename(columns={'SKU': 'ID', 'Total_Spend': 'Total Spend', 'Total_Sales': 'Total Sales'}, inplace=True)
+    
+    # --- KROK: Łączenie ze szczegółami produktu ---
+    product_details = load_product_details()
+    if not product_details.empty:
+        aggregated_df = pd.merge(
+            aggregated_df,
+            product_details,
+            on='ID',
+            how='left'
+        )
+        # Wypełnij puste komórki (tam gdzie nie znaleziono dopasowania)
+        for col in ['nazwa', 'marka', 'kategoria']:
+            if col in aggregated_df.columns:
+                aggregated_df[col] = aggregated_df[col].fillna('')
+    else:
+        # Dodaj puste kolumny, jeśli ładowanie szczegółów się nie powiodło
+        aggregated_df['nazwa'] = ''
+        aggregated_df['marka'] = ''
+        aggregated_df['kategoria'] = ''
+        
+    # --- NOWY KROK: Łączenie z danymi Total Sales i Total Orders ---
+    country_code = KRAJ_CODE_MAP.get(country)
+    if country_code:
+        total_data = load_total_sales_and_orders(okres, country_code)
+        if not total_data.empty:
+            aggregated_df = pd.merge(
+                aggregated_df,
+                total_data,
+                on='ID',
+                how='left'
+            )
+            # Wypełnij puste komórki (tam gdzie nie znaleziono dopasowania)
+            aggregated_df['Total Sales (Total)'] = aggregated_df['Total Sales (Total)'].fillna(0)
+            aggregated_df['Total Orders (Total)'] = aggregated_df['Total Orders (Total)'].fillna(0)
+        else:
+            # Dodaj puste kolumny, jeśli nie ma danych
+            aggregated_df['Total Sales (Total)'] = 0.0
+            aggregated_df['Total Orders (Total)'] = 0
+    else:
+        aggregated_df['Total Sales (Total)'] = 0.0
+        aggregated_df['Total Orders (Total)'] = 0
+# --- KONIEC NOWEGO KROKU ---
+        
+    # --- NOWY KROK: Obliczenie TACOS ---
+    aggregated_df['TACOS'] = np.where(
+        aggregated_df['Total Sales (Total)'] > 0,
+        aggregated_df['Total Spend'] / aggregated_df['Total Sales (Total)'],
+        0
+    )
+    # --- KONIEC NOWEGO KROKU ---
+        
+    # Ustawienie kolejności kolumn
+    final_cols = ['ID', 'nazwa', 'marka', 'kategoria', 'Total Spend', 'Total Sales', 'ACOS', 'Total Sales (Total)', 'Total Orders (Total)', 'TACOS'] # Dodano TACOS
+    # Upewnij się, że wszystkie kolumny istnieją
+    existing_cols = [col for col in final_cols if col in aggregated_df.columns]
+    aggregated_df = aggregated_df[existing_cols]
+
+    return aggregated_df.sort_values(by="Total Spend", ascending=False)
+# <--- KONIEC ZMIAN W FUNKCJI ---
 
 
 # --- HEADER ---
@@ -462,8 +833,12 @@ st.markdown("---")
 
 
 # --- TABS ---
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "📈 New Bid", "🔍 Find Product ID", "📜 Rules"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "📈 New Bid", "🔍 Find Product ID", "📜 Rules", "🎯 ID ACOS", "Find Product 2"])
 
+# <--- POCZĄTEK ZAKTUALIZOWANEJ ZAKŁADKI "Dashboard" (z dwoma filtrami kampanii) ---
+# PODMIEŃ CAŁY BLOK 'with tab1:' W SWOIM KODZIE
+# <--- POCZĄTEK ZAKTUALIZOWANEJ ZAKŁADKI "Dashboard" (poprawiona logika % zmiany) ---
+# PODMIEŃ CAŁY BLOK 'with tab1:' W SWOIM KODZIE
 with tab1:
     def calculate_summary_row(df, currency_symbol):
         if df.empty:
@@ -515,7 +890,24 @@ with tab1:
                 okres = st.radio("Przedział czasowy:", ["Tydzień", "Miesiąc", "Porównanie"])
             with main_cols[1]:
                 st.markdown('<div class="main-filter-container">', unsafe_allow_html=True)
-                kraj = st.selectbox("Kraj", list(KRAJE_MAPA.keys()))
+                
+                kraje_opcje = ["Wszystko"] + list(KRAJE_MAPA.keys())
+                kraj = st.selectbox("Kraj", kraje_opcje)
+                
+                eur_pln_rate = 0.0 
+                if kraj == "Wszystko":
+                    eur_pln_rate = st.number_input(
+                        "Podaj kurs 1 EUR w PLN (np. 4.30)", 
+                        min_value=1.0, 
+                        value=4.30, 
+                        step=0.01, 
+                        format="%.4f",
+                        key="eur_pln_rate_input",
+                        help="Ten kurs zostanie użyty do przeliczenia wszystkich kwot z 'Polska' (PLN) na EUR, aby ujednolicić dane."
+                    )
+                    if eur_pln_rate <= 0:
+                        st.error("Proszę podać kurs EUR/PLN większy od 0.")
+
                 typ_kampanii = st.selectbox("Typ kampanii", ["Sponsored Products", "Sponsored Brands", "Sponsored Display"])
                 
                 if typ_kampanii == "Sponsored Products":
@@ -531,6 +923,34 @@ with tab1:
                 st.markdown('</div>', unsafe_allow_html=True)
             with main_cols[3]:
                 st.markdown("<h4 style='text-align: center; font-weight: 600; color: #333; margin-bottom: 17px;'>Filtrowanie</h4>", unsafe_allow_html=True)
+                
+                search_term_product_ad = "" 
+                search_term_campaign_exact = "" 
+                search_term_campaign_partial = "" 
+
+                if widok == "Product ad":
+                    search_term_product_ad = st.text_input(
+                        "Wyszukaj (SKU, ASIN, Nazwa):", 
+                        placeholder="sku1, sku2, nazwa3...",
+                        key="product_ad_search",
+                        help="Wpisz wiele wartości po przecinku (logika 'LUB')."
+                    )
+                
+                target_views_for_campaign_search = ["Product targeting", "Keyword", "Auto keyword/ASIN"]
+                if widok in target_views_for_campaign_search:
+                    search_term_campaign_exact = st.text_input(
+                        "Wyszukaj DOKŁADNĄ Nazwę Kampanii:", 
+                        placeholder="dokladna nazwa1, dokladna nazwa2...",
+                        key="campaign_search_exact",
+                        help="Wpisz DOKŁADNE nazwy kampanii (oddzielone przecinkiem, logika 'LUB')."
+                    )
+                    search_term_campaign_partial = st.text_input(
+                        "Wyszukaj SŁOWO w Nazwie Kampanii:", 
+                        placeholder="słowo1, słowo2...",
+                        key="campaign_search_partial",
+                        help="Wpisz SŁOWA kluczowe (oddzielone przecinkiem, logika 'LUB')."
+                    )
+
                 def render_metric_filter(label, key):
                     cols = st.columns([1, 1.5, 1.4])
                     cols[0].markdown(f"<p class='filter-label'>{label}</p>", unsafe_allow_html=True)
@@ -547,28 +967,61 @@ with tab1:
                 highlight_filter_placeholder = st.empty()
 
         st.markdown("<br>", unsafe_allow_html=True)
-        ustawienia_kraju = KRAJE_MAPA[kraj]
-        tab_id = ustawienia_kraju["tab_id"]
-        gid_w, gid_m = None, None
-        if typ_kampanii == "Sponsored Products":
-            gid_w = ustawienia_kraju.get("AK_TYDZIEN") if widok == "Auto keyword/ASIN" else ustawienia_kraju.get("SP_TYDZIEN")
-            gid_m = ustawienia_kraju.get("AK_MIESIAC") if widok == "Auto keyword/ASIN" else ustawienia_kraju.get("SP_MIESIAC")
-        elif typ_kampanii == "Sponsored Brands":
-            gid_w, gid_m = ustawienia_kraju.get("SB_TYDZIEN"), ustawienia_kraju.get("SB_MIESIAC")
-        elif typ_kampanii == "Sponsored Display":
-            gid_w, gid_m = ustawienia_kraju.get("SD_TYDZIEN"), ustawienia_kraju.get("SD_MIESIAC")
-        
-        df_w_raw, df_m_raw = None, None
-        try:
-            if okres in ["Tydzień", "Porównanie"] and gid_w and tab_id:
-                df_w_raw = pd.read_csv(get_url(tab_id, gid_w), dtype=str)
-            if okres in ["Miesiąc", "Porównanie"] and gid_m and tab_id:
-                df_m_raw = pd.read_csv(get_url(tab_id, gid_m), dtype=str)
-        except Exception as e:
-            st.error(f"Błąd ładowania danych źródłowych: {e}")
 
-        df_w = process_loaded_data(df_w_raw, typ_kampanii)
-        df_m = process_loaded_data(df_m_raw, typ_kampanii)
+        all_dfs_w, all_dfs_m = [], []
+        
+        if kraj == "Wszystko":
+            countries_to_load = list(KRAJE_MAPA.keys())
+        else:
+            countries_to_load = [kraj]
+            
+        for country_name in countries_to_load:
+            ustawienia_kraju = KRAJE_MAPA.get(country_name)
+            if not ustawienia_kraju:
+                continue 
+
+            tab_id = ustawienia_kraju.get("tab_id")
+            gid_w, gid_m = None, None
+            
+            if typ_kampanii == "Sponsored Products":
+                gid_w = ustawienia_kraju.get("AK_TYDZIEN") if widok == "Auto keyword/ASIN" else ustawienia_kraju.get("SP_TYDZIEN")
+                gid_m = ustawienia_kraju.get("AK_MIESIAC") if widok == "Auto keyword/ASIN" else ustawienia_kraju.get("SP_MIESIAC")
+            elif typ_kampanii == "Sponsored Brands":
+                gid_w, gid_m = ustawienia_kraju.get("SB_TYDZIEN"), ustawienia_kraju.get("SB_MIESIAC")
+            elif typ_kampanii == "Sponsored Display":
+                gid_w, gid_m = ustawienia_kraju.get("SD_TYDZIEN"), ustawienia_kraju.get("SD_MIESIAC")
+
+            df_w_raw, df_m_raw = None, None
+            try:
+                if okres in ["Tydzień", "Porównanie"] and gid_w and tab_id:
+                    df_w_raw = pd.read_csv(get_url(tab_id, gid_w))
+                if okres in ["Miesiąc", "Porównanie"] and gid_m and tab_id:
+                    df_m_raw = pd.read_csv(get_url(tab_id, gid_m))
+            except Exception as e:
+                st.error(f"Błąd ładowania danych źródłowych dla {country_name}: {e}")
+
+            df_w_country = process_loaded_data(df_w_raw, typ_kampanii)
+            df_m_country = process_loaded_data(df_m_raw, typ_kampanii)
+
+            if kraj == "Wszystko" and country_name == "Polska" and eur_pln_rate > 0:
+                currency_cols_to_convert = ["Spend", "Sales", "Daily budget", "Bid", "Price", "CPC"]
+                
+                for df_to_convert in [df_w_country, df_m_country]:
+                    if df_to_convert is not None and not df_to_convert.empty:
+                        for col in currency_cols_to_convert:
+                            if col in df_to_convert.columns:
+                                df_to_convert[col] = pd.to_numeric(df_to_convert[col], errors='coerce').fillna(0) / eur_pln_rate
+
+            if df_w_country is not None and not df_w_country.empty:
+                df_w_country['Kraj'] = country_name
+                all_dfs_w.append(df_w_country)
+                
+            if df_m_country is not None and not df_m_country.empty:
+                df_m_country['Kraj'] = country_name
+                all_dfs_m.append(df_m_country)
+
+        df_w = pd.concat(all_dfs_w, ignore_index=True) if all_dfs_w else pd.DataFrame()
+        df_m = pd.concat(all_dfs_m, ignore_index=True) if all_dfs_m else pd.DataFrame()
         
         if widok == "Product ad":
             account_product_map = product_map_df[product_map_df['Account'] == konto]
@@ -578,22 +1031,23 @@ with tab1:
                     return report_df
                 if product_map.empty:
                     return report_df
-
                 join_key = 'SKU' if 'SKU' in report_df.columns and not report_df['SKU'].isnull().all() else 'ASIN'
-                
                 if join_key not in report_df.columns:
                     return report_df
                 
-                details_to_join = product_map.drop(columns=['Account', 'Campaign', 'Campaign Type', 'Targeting Type', 'Country'], errors='ignore')
+                cols_to_add_from_map = ['SKU', 'ASIN', 'Nazwa produktu', 'Price', 'Quantity']
+                details_to_join = product_map[list(set(cols_to_add_from_map) & set(product_map.columns))].copy()
                 
                 cols_in_report = report_df.columns
                 cols_to_drop_from_details = [col for col in details_to_join.columns if col in cols_in_report and col != join_key]
-                details_to_join = details_to_join.drop(columns=cols_to_drop_from_details)
+                details_to_join = details_to_join.drop(columns=cols_to_drop_from_details, errors='ignore')
 
-                details_to_join.drop_duplicates(subset=[join_key], inplace=True)
-
-                enriched_df = pd.merge(report_df, details_to_join, on=join_key, how='left')
-                return enriched_df
+                if not details_to_join.empty and join_key in details_to_join.columns:
+                    details_to_join.drop_duplicates(subset=[join_key], inplace=True)
+                    enriched_df = pd.merge(report_df, details_to_join, on=join_key, how='left')
+                    return enriched_df
+                else:
+                    return report_df
 
             df_w = enrich_product_ad_data(df_w, account_product_map)
             df_m = enrich_product_ad_data(df_m, account_product_map)
@@ -604,7 +1058,9 @@ with tab1:
 
         if df is not None and not df.empty:
             STANDARDIZED_CAMPAIGN_COL = "_Campaign_Standardized"
+            
             base = {
+                "Kraj": "Kraj", 
                 "Campaign": STANDARDIZED_CAMPAIGN_COL, "Match type": "Match type", "Keyword text": "Keyword text", "Targeting expression": "Product targeting expression",
                 "SKU": "SKU", "Customer search term": "Customer search term", "Targeting type":"Targeting type", "Product":"Product","Portfolio":"Portfolio name (Informational only)","Entity":"Entity","State":"State",
                 "ASIN":"ASIN", "Nazwa produktu": "Nazwa produktu", "Price": "Price", "Quantity": "Quantity", "Daily budget":"Daily budget",
@@ -613,9 +1069,10 @@ with tab1:
             }
 
             if widok == "Product ad":
-                ordered = ["Campaign", "Targeting type", "Campaign Type", "Entity", "State", "SKU", "ASIN", "Nazwa produktu", "Price", "Quantity", "Impressions", "Clicks", "CTR", "CR", "Spend", "CPC", "Orders", "Sales", "ACOS", "ROAS", "Bid"]
+                ordered = ["Kraj", "Campaign", "Targeting type", "Campaign Type", "Entity", "State", "SKU", "ASIN", "Nazwa produktu", "Price", "Quantity", "Impressions", "Clicks", "CTR", "CR", "Spend", "CPC", "Orders", "Sales", "ACOS", "ROAS", "Bid"]
             else:
-                ordered = ["Campaign", "Match type", "Keyword text", "Targeting expression", "Customer search term", "Targeting type", "Product", "Portfolio", "Entity", "State", "Daily budget", "Impressions", "Clicks", "CTR", "CR", "Spend", "CPC", "Orders", "Sales", "ACOS", "ROAS", "Bid"]
+                ordered = ["Kraj", "Campaign", "Match type", "Keyword text", "Targeting expression", "Customer search term", "Targeting type", "Product", "Portfolio", "Entity", "State", "Daily budget", "Impressions", "Clicks", "CTR", "CR", "Spend", "CPC", "Orders", "Sales", "ACOS", "ROAS", "Bid"]
+
                 if widok == "Product targeting":
                     if "Match type" in ordered: ordered.remove("Match type")
                     if "Product targeting expression" in df.columns: df["Match type"] = df["Product targeting expression"].astype(str).str.split('=', n=1).str[0]
@@ -627,19 +1084,16 @@ with tab1:
             if 'ASIN' in df.columns and 'ASIN' not in cols_map:
                 cols_map['ASIN'] = 'ASIN'
             
-            # <--- ZMIANA: Kluczowa poprawka logiki, która powodowała znikanie kolumny "Campaign"
             ordered_final = [k for k in ordered if k in cols_map or (k in df.columns and k not in cols_map)]
 
             if 'Entity' in df.columns: df = df[df["Entity"] == widok]
 
             if okres == "Porównanie" and df_m is not None and not df_m.empty:
                 numeric_metrics = [c for c in NUMERIC_COLS if c not in ['Bid', 'Bid_new', 'Daily budget']]
-                key_display_names = [k for k in ordered_final if k not in numeric_metrics]
+                key_display_names = [k for k in ordered_final if k not in numeric_metrics] 
                 key_source_names = list(set([cols_map.get(k, k) for k in key_display_names if cols_map.get(k,k) in df.columns]))
-
                 metric_display_names = [k for k in ordered_final if k in numeric_metrics]
                 metric_source_names = list(set([cols_map.get(k, k) for k in metric_display_names if cols_map.get(k,k) in df.columns]))
-                
                 monthly_cols_to_keep = [c for c in key_source_names + metric_source_names if c in df_m.columns]
                 df_m_prepared = df_m[monthly_cols_to_keep].copy()
                 rename_dict = {col: f"{col}_M" for col in metric_source_names}
@@ -663,8 +1117,10 @@ with tab1:
                     df_display_builder[col_display_name] = df[col_display_name]
             df_display = pd.DataFrame(df_display_builder)
 
+            # KROK 1: Zastosuj "Reguły" z zakładki 4. To jest baza.
             df_display_rules, _ = apply_rules_to_bids_vectorized(df_display, st.session_state.rules)
             
+            # KROK 2: Zastosuj filtry metryk (Spend, ACOS, etc.)
             filter_map = {
                 "Spend": (spend_filter, spend_value), "Sales": (sales_filter, sales_value), "Orders": (orders_filter, orders_value),
                 "ACOS": (acos_filter, acos_value), "ROAS": (roas_filter, roas_value), "CTR": (ctr_filter, ctr_value), "CR": (cr_filter, cr_value)
@@ -679,7 +1135,99 @@ with tab1:
                         elif op == "=": df_display_rules = df_display_rules[df_display_rules[col] == val]
                     except (ValueError, TypeError, KeyError): pass
             
-            summary_for_dropdown_df = pd.DataFrame(calculate_summary_row(df_display_rules, 'EUR'))
+            # KROK 3: Zastosuj filtry wyszukiwania tekstowego (SKU, Kampanie)
+            if widok == "Product ad" and search_term_product_ad:
+                search_list = [term.strip().lower() for term in search_term_product_ad.split(',') if term.strip()]
+                if search_list:
+                    search_cols = ['SKU', 'ASIN', 'Nazwa produktu']
+                    existing_search_cols = [col for col in search_cols if col in df_display_rules.columns]
+                    if not existing_search_cols:
+                        st.warning("Nie można wyszukać - brak kolumn SKU, ASIN lub Nazwa produktu w tabeli.", icon="⚠️")
+                    else:
+                        combined_mask = pd.Series([False] * len(df_display_rules), index=df_display_rules.index)
+                        for term in search_list:
+                            term_mask = pd.Series([False] * len(df_display_rules), index=df_display_rules.index)
+                            for col in existing_search_cols:
+                                term_mask = term_mask | df_display_rules[col].astype(str).str.lower().str.contains(term, na=False)
+                            combined_mask = combined_mask | term_mask
+                        df_display_rules = df_display_rules[combined_mask]
+
+            target_views_for_campaign_search = ["Product targeting", "Keyword", "Auto keyword/ASIN"]
+            if widok in target_views_for_campaign_search and search_term_campaign_exact:
+                search_list_campaign_exact = [term.strip().lower() for term in search_term_campaign_exact.split(',') if term.strip()]
+                if search_list_campaign_exact:
+                    if 'Campaign' not in df_display_rules.columns:
+                        st.warning("Nie można wyszukać - brak kolumny 'Campaign' w tabeli.", icon="⚠️")
+                    else:
+                        exact_match_mask = df_display_rules['Campaign'].astype(str).str.lower().isin(search_list_campaign_exact)
+                        df_display_rules = df_display_rules[exact_match_mask]
+
+            if widok in target_views_for_campaign_search and search_term_campaign_partial:
+                search_list_campaign_partial = [term.strip().lower() for term in search_term_campaign_partial.split(',') if term.strip()]
+                if search_list_campaign_partial:
+                    if 'Campaign' not in df_display_rules.columns:
+                        st.warning("Nie można wyszukać - brak kolumny 'Campaign' w tabeli.", icon="⚠️")
+                    else:
+                        combined_mask_partial = pd.Series([False] * len(df_display_rules), index=df_display_rules.index)
+                        for term in search_list_campaign_partial:
+                            term_mask_partial = df_display_rules['Campaign'].astype(str).str.lower().str.contains(term, na=False)
+                            combined_mask_partial = combined_mask_partial | term_mask_partial
+                        df_display_rules = df_display_rules[combined_mask_partial]
+            
+            # --- ZMIANA: NOWY BLOK LOGIKI ZMIANY % ---
+            grid_key = f"{konto}_{kraj}_{typ_kampanii}_{widok}_{okres}"
+
+            st.markdown("---")
+            with st.form(key="bid_change_form"):
+                st.markdown("#### Zastosuj zmianę % do stawek (dla wszystkich wierszy poniżej)")
+                form_cols = st.columns([2, 1, 1])
+                with form_cols[0]:
+                    # Wartość domyślna formularza jest pobierana ze stanu sesji
+                    bid_perc_input = st.number_input(
+                        "Wprowadź zmianę % (np. -10 lub 20)", 
+                        value=st.session_state.bulk_bid_change.get(grid_key), # Pobierz zapisaną wartość
+                        format="%.2f",
+                        placeholder="Wpisz wartość...",
+                        label_visibility="collapsed"
+                    )
+                with form_cols[1]:
+                    apply_button = st.form_submit_button("Zastosuj / Zapisz", use_container_width=True)
+                with form_cols[2]:
+                    clear_button = st.form_submit_button("Wyczyść zmianę", use_container_width=True)
+
+            if apply_button:
+                # Zapisz zmianę % do pamięci sesji dla tego widoku
+                st.session_state.bulk_bid_change[grid_key] = bid_perc_input
+                st.toast(f"Zapisano zmianę {bid_perc_input}%. Zastosowano do tabeli.")
+                st.rerun() # Wymuś odświeżenie, aby zastosować zmianę
+
+            if clear_button:
+                # Wyczyść zmianę % z pamięci sesji
+                st.session_state.bulk_bid_change[grid_key] = None
+                st.toast("Wyczyszczono zmianę procentową.")
+                st.rerun() # Wymuś odświeżenie, aby przywrócić wartości z reguł
+
+            # KROK 4: Zastosuj zmianę procentową (jeśli jest zapisana w sesji)
+            # Ta logika wykona się na każdym przebiegu, *po* regułach z KROKU 1
+            current_bulk_perc = st.session_state.bulk_bid_change.get(grid_key)
+            if current_bulk_perc is not None:
+                if 'Bid' in df_display_rules.columns and 'Bid_new' in df_display_rules.columns:
+                    try:
+                        multiplier = 1 + (float(current_bulk_perc) / 100.0)
+                        if multiplier < 0: multiplier = 0 
+                        
+                        # NADPISZ Bid_new, bazując na ORYGINALNYM Bid
+                        df_display_rules['Bid_new'] = pd.to_numeric(df_display_rules['Bid'], errors='coerce').fillna(0) * multiplier
+                        df_display_rules['Bid_new'] = df_display_rules['Bid_new'].round(2)
+                    except Exception as e:
+                        st.error(f"Wystąpił błąd podczas zmiany stawek: {e}")
+                else:
+                    st.error("Nie można zastosować zmiany - brak kolumny 'Bid' lub 'Bid_new' w danych.")
+            # --- KONIEC ZMIANY ---
+
+            # KROK 5: Zastosuj filtr podświetlenia (ten filtr tylko ukrywa wiersze, nie zmienia stawek)
+            currency_symbol = 'PLN' if kraj == 'Polska' else 'EUR'
+            summary_for_dropdown_df = pd.DataFrame(calculate_summary_row(df_display_rules, currency_symbol))
 
             highlight_rules = [r for r in st.session_state.rules if r.get('type') == 'Highlight' and r.get('name')]
             highlight_filter_options = {"Brak": None}
@@ -722,12 +1270,6 @@ with tab1:
             if "_Campaign_Standardized" in df_display_rules.columns:
                 df_display_rules.rename(columns={"_Campaign_Standardized": "Campaign"}, inplace=True)
 
-            # =================================================================================
-            # === ZASTOSOWANIE POPRAWKI #2 (DASHBOARD) ===
-            # =================================================================================
-            df_display_rules = convert_int_columns_to_float(df_display_rules)
-            # =================================================================================
-
             gb = GridOptionsBuilder.from_dataframe(df_display_rules)
             
             js_conditions = []
@@ -738,66 +1280,50 @@ with tab1:
             if not highlight_rules_df.empty:
                 for rule_name, group in highlight_rules_df.groupby('name'):
                     group_js_conditions = []
-                    
                     highlight_col = group['highlight_column'].iloc[0]
                     color_hex = color_map_hex.get(group['color'].iloc[0], 'Czerwony')
-
                     for _, rule in group.iterrows():
                         metric = rule.get("metric")
                         op = condition_map_js.get(rule.get("condition"))
                         value = rule.get("value")
                         value_type = rule.get("value_type")
-
-                        if not all([metric, op]):
-                            continue
-
+                        if not all([metric, op]): continue
                         js_condition_string_part = ""
-                        
                         if isinstance(metric, str) and 'x' in metric:
                             try:
                                 parts = metric.lower().split('x')
                                 multiplier = float(parts[0].replace(',', '.'))
                                 source_col_name = parts[1].strip().capitalize()
                                 target_col_name = str(value)
-                                
                                 js_condition_string_part = (
                                     f" (params.data && typeof params.data['{source_col_name}'] === 'number' && "
                                     f"typeof params.data['{target_col_name}'] === 'number' && "
                                     f"({multiplier} * params.data['{source_col_name}'] {op} params.data['{target_col_name}'])) "
                                 )
-                            except (ValueError, IndexError):
-                                continue
+                            except (ValueError, IndexError): continue
                         else: 
                             final_comparison_value = None
                             is_numeric_comparison = True
-                            
                             if value_type == 'Średnia z konta':
                                 if summary_for_dropdown_df is not None and metric in summary_for_dropdown_df.columns:
                                     final_comparison_value = summary_for_dropdown_df.iloc[0][metric]
-                                else:
-                                    continue
+                                else: continue
                             else:
                                 final_comparison_value = value
                                 if isinstance(final_comparison_value, str) and any(c.isalpha() for c in final_comparison_value):
                                     is_numeric_comparison = False
-
                             if is_numeric_comparison:
                                 try:
                                     rule_value_conv = float(final_comparison_value)
-                                    if math.isnan(rule_value_conv):
-                                        continue
+                                    if math.isnan(rule_value_conv): continue
                                     if value_type == 'Wpisz wartość' and metric in ["ACOS", "CTR", "CR"]:
                                         rule_value_conv /= 100.0
                                     js_condition_string_part = f" (params.data && typeof params.data['{metric}'] === 'number' && params.data['{metric}'] {op} {rule_value_conv}) "
-                                except (ValueError, TypeError):
-                                    continue
+                                except (ValueError, TypeError): continue
                             else: 
                                 column_to_compare = str(final_comparison_value)
                                 js_condition_string_part = f" (params.data && typeof params.data['{metric}'] === 'number' && typeof params.data['{column_to_compare}'] === 'number' && params.data['{metric}'] {op} params.data['{column_to_compare}']) "
-                        
-                        if js_condition_string_part:
-                            group_js_conditions.append(js_condition_string_part)
-                    
+                        if js_condition_string_part: group_js_conditions.append(js_condition_string_part)
                     if group_js_conditions:
                         combined_condition = " && ".join(group_js_conditions)
                         js_conditions.append(f"if ({combined_condition} && params.colDef.field === '{highlight_col}') {{ style.backgroundColor = '{color_hex}'; }}")
@@ -816,21 +1342,30 @@ with tab1:
             gb.configure_default_column(resizable=True, autoHeaderHeight=True, cellStyle=cell_style_jscode)
             
             for col in df_display_rules.columns:
-                gb.configure_column(col, filter='agSetColumnFilter')
+                if col == "Kraj":
+                     gb.configure_column(col, filter='agSetColumnFilter', pinned='left', width=120)
+                else:
+                     gb.configure_column(col, filter='agSetColumnFilter')
             
             if "Bid_new" in df_display_rules.columns: gb.configure_column("Bid_new", editable=True)
+
             currency_symbol = 'PLN' if kraj == 'Polska' else 'EUR'
+            formatter_js_currency_simple = JsCode(f"""function(params){{if(params.value==null||isNaN(params.value))return'';return params.value.toLocaleString('pl-PL',{{style:'currency',currency:'{currency_symbol}',maximumFractionDigits:2}})}}""")
+            
             for c in df_display_rules.columns:
                 c_base = c.replace('_M', '')
                 formatter_js = None
-                if c_base in NUMERIC_COLS or c == "Campaign":
+                if c_base in NUMERIC_COLS or c == "Campaign" or c == "Kraj":
                     if "ACOS" in c_base or "CTR" in c_base or "CR" in c_base: formatter_js=JsCode("""function(params){if(params.value==null||isNaN(params.value))return'';return params.value.toLocaleString('pl-PL',{style:'percent', minimumFractionDigits:2, maximumFractionDigits:2})}""")
-                    elif any(x in c_base for x in["Price","Spend","Sales","Bid","CPC"]): formatter_js=JsCode(f"""function(params){{if(params.value==null||isNaN(params.value))return'';return params.value.toLocaleString('pl-PL',{{style:'currency',currency:'{currency_symbol}',maximumFractionDigits:2}})}}""")
+                    elif any(x in c_base for x in["Price","Spend","Sales","Bid","CPC"]):
+                        formatter_js = formatter_js_currency_simple
                     elif "ROAS" in c_base: formatter_js=JsCode("""function(params){if(params.value==null||isNaN(params.value))return'';return params.value.toLocaleString('pl-PL',{maximumFractionDigits:2})}""")
-                    elif c != "Campaign": formatter_js=JsCode("""function(params){if(params.value==null||isNaN(params.value))return'';return Math.round(params.value).toLocaleString('pl-PL')}""")
-                    if c != "Campaign": gb.configure_column(c, type=["numericColumn","rightAligned"], valueFormatter=formatter_js)
+                    elif c != "Campaign" and c != "Kraj": formatter_js=JsCode("""function(params){if(params.value==null||isNaN(params.value))return'';return Math.round(params.value).toLocaleString('pl-PL')}""")
+                    
+                    if c != "Campaign" and c != "Kraj": 
+                        gb.configure_column(c, type=["numericColumn","rightAligned"], valueFormatter=formatter_js)
 
-            grid_key = f"{konto}_{kraj}_{typ_kampanii}_{widok}_{okres}"
+            # Klucz siatki jest już zdefiniowany wyżej
             if 'current_grid_key' not in st.session_state or st.session_state.current_grid_key != grid_key:
                 st.session_state.current_grid_key = grid_key
                 st.session_state.pinned_row = calculate_summary_row(df_display_rules, currency_symbol)
@@ -841,7 +1376,7 @@ with tab1:
             
             grid_response = AgGrid(
                 df_display_rules, gridOptions=grid_options, update_mode=GridUpdateMode.MODEL_CHANGED,
-                width="100%", height=600, allow_unsafe_jscode=True, theme='ag-theme-alpine',
+                height=600, allow_unsafe_jscode=True, theme='ag-theme-alpine',
                 key=grid_key, enable_enterprise_modules=True
             )
             
@@ -853,33 +1388,132 @@ with tab1:
                 st.rerun()
 
             st.markdown("---")
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                df_filtered.to_excel(writer, index=False, sheet_name='DashboardExport')
-                workbook, worksheet = writer.book, writer.sheets['DashboardExport']
-                header = df_filtered.columns.values.tolist()
-                currency_format = workbook.add_format({'num_format': f'#,##0.00 "{currency_symbol}"'}); percent_format = workbook.add_format({'num_format': '0.00%'}); integer_format = workbook.add_format({'num_format': '#,##0'}); roas_format = workbook.add_format({'num_format': '#,##0.00'})
-                for idx, col_name in enumerate(header):
-                    c_base = col_name.replace('_M', '')
-                    if "ACOS" in c_base or "CTR" in c_base or "CR" in c_base: worksheet.set_column(idx, idx, 12, percent_format)
-                    elif any(x in c_base for x in ["Price", "Spend", "Sales", "Bid", "CPC"]): worksheet.set_column(idx, idx, 15, currency_format)
-                    elif "ROAS" in c_base: worksheet.set_column(idx, idx, 12, roas_format)
-                    elif c_base in ["Orders", "Impressions", "Clicks", "Quantity", "Units"]: worksheet.set_column(idx, idx, 12, integer_format)
-                worksheet.autofit()
             
-            st.download_button(label="📥 Pobierz Excel", data=buffer, file_name=f"dashboard_{kraj}_{typ_kampanii}_{widok}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", help="Pobierz dane widoczne w tabeli jako plik Excel")
+            btn_cols = st.columns(3)
+            
+            with btn_cols[0]:
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                    df_filtered.to_excel(writer, index=False, sheet_name='DashboardExport')
+                    workbook, worksheet = writer.book, writer.sheets['DashboardExport']
+                    header = df_filtered.columns.values.tolist()
+                    currency_format = workbook.add_format({'num_format': f'#,##0.00 "{currency_symbol}"'}); 
+                    percent_format = workbook.add_format({'num_format': '0.00%'}); 
+                    integer_format = workbook.add_format({'num_format': '#,##0'}); 
+                    roas_format = workbook.add_format({'num_format': '#,##0.00'})
+                    for idx, col_name in enumerate(header):
+                        c_base = col_name.replace('_M', '')
+                        if "ACOS" in c_base or "CTR" in c_base or "CR" in c_base: worksheet.set_column(idx, idx, 12, percent_format)
+                        elif any(x in c_base for x in ["Price", "Spend", "Sales", "Bid", "CPC"]): worksheet.set_column(idx, idx, 15, currency_format)
+                        elif "ROAS" in c_base: worksheet.set_column(idx, idx, 12, roas_format)
+                        elif c_base in ["Orders", "Impressions", "Clicks", "Quantity", "Units"]: worksheet.set_column(idx, idx, 12, integer_format)
+                    worksheet.autofit()
+                
+                st.download_button(
+                    label="📥 Pobierz widok (Excel)", 
+                    data=buffer, 
+                    file_name=f"dashboard_view_{kraj}_{widok}.xlsx", 
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+                    help="Pobierz dane widoczne w tabeli jako plik Excel (do podglądu).",
+                    use_container_width=True
+                )
 
-            st.markdown("---")
-            if st.button("✅ Zapisz ręczne zmiany do zastosowania w 'New Bid'", use_container_width=True):
-                if grid_response['data'] is not None:
-                    updated_df = pd.DataFrame(grid_response['data'])
-                    st.session_state.manual_bid_updates = { "data": updated_df, "widok": widok, "kraj": kraj, "typ_kampanii": typ_kampanii, "cols_map": cols_map }
-                    st.success("Ręczne zmiany stawek zostały zapisane! Zostaną one automatycznie nałożone w zakładce 'New Bid'.")
-                else:
-                    st.warning("Brak danych w tabeli do zapisania.")
+            with btn_cols[1]:
+                is_disabled = (kraj == "Wszystko")
+                help_text = "Generuje plik .xlsx gotowy do wgrania, zawierający tylko wiersze ze zmienionymi stawkami. Działa tylko dla pojedynczego kraju."
+                if is_disabled:
+                    help_text = "Ta funkcja jest niedostępna dla widoku 'Wszystko'. Wybierz pojedynczy kraj, aby wygenerować plik do wgrania."
+
+                if st.button("📑 Pobierz PLIK DO WGRANIA", use_container_width=True, disabled=is_disabled, help=help_text):
+                    if grid_response['data'] is not None:
+                        current_grid_data = pd.DataFrame(grid_response['data'])
+                        
+                        bid_c = pd.to_numeric(current_grid_data['Bid'], errors='coerce').fillna(0)
+                        bid_new_c = pd.to_numeric(current_grid_data['Bid_new'], errors='coerce').fillna(0)
+                        changed_rows_df = current_grid_data[bid_c.round(2) != bid_new_c.round(2)].copy()
+
+                        if changed_rows_df.empty:
+                            st.warning("Brak zmienionych stawek do pobrania. Zmień wartości w 'Bid_new'.")
+                        else:
+                            try:
+                                gid_key = {"Sponsored Products": "SP_TYDZIEN", "Sponsored Brands": "SB_TYDZIEN", "Sponsored Display": "SD_TYDZIEN"}.get(typ_kampanii)
+                                gid = KRAJE_MAPA[kraj].get(gid_key)
+                                tab_id = KRAJE_MAPA[kraj]["tab_id"]
+                                
+                                raw_df = pd.read_csv(get_url(tab_id, gid), dtype=str)
+                                original_columns = raw_df.columns.tolist()
+                                processed_raw_df = process_loaded_data(raw_df.copy(), typ_kampanii)
+
+                                key_clean_names = ['Campaign']
+                                if widok == 'Keyword': key_clean_names.extend(['Keyword text', 'Match type'])
+                                elif widok in ['Product targeting', 'Audience targeting', 'Contextual targeting']: key_clean_names.append('Targeting expression')
+                                elif widok == 'Product ad': key_clean_names.append('SKU')
+                                elif widok == 'Auto keyword/ASIN': key_clean_names.append('Customer search term')
+                                
+                                rename_map_for_updates = {v: k for k,v in cols_map.items() if k in key_clean_names}
+                                updates_renamed = changed_rows_df.rename(columns=rename_map_for_updates)
+                                update_keys = [k for k in key_clean_names if k in updates_renamed.columns]
+                                updates_for_merge = updates_renamed[update_keys + ['Bid_new']].copy()
+                                
+                                rename_for_merge = {k: cols_map.get(k) for k in update_keys}
+                                updates_for_merge.rename(columns=rename_for_merge, inplace=True)
+                                merge_on_cols = [cols_map.get(k) for k in update_keys]
+
+                                for key in merge_on_cols:
+                                    processed_raw_df[key] = processed_raw_df[key].astype(str).fillna('')
+                                    updates_for_merge[key] = updates_for_merge[key].astype(str).fillna('')
+                                
+                                merged_df = pd.merge(processed_raw_df, updates_for_merge, on=merge_on_cols, how='left')
+                                merged_df['Bid'] = merged_df['Bid_new'].fillna(merged_df['Bid'])
+                                merged_df['Operation'] = np.where(merged_df['Bid_new'].notna(), 'Update', '')
+                                
+                                upload_file_df = merged_df[merged_df['Operation'] == 'Update'].copy()
+                                
+                                POTENTIAL_CAMPAIGN_COLS = ["Campaign name (Informational only)", "Campaign Name (Informational only)", "Campaign name", "Campaign Name", "Campaign"]
+                                actual_campaign_col = find_first_existing_column(raw_df, POTENTIAL_CAMPAIGN_COLS)
+                                if actual_campaign_col and '_Campaign_Standardized' in upload_file_df.columns:
+                                    upload_file_df.rename(columns={'_Campaign_Standardized': actual_campaign_col}, inplace=True)
+                                
+                                final_columns_existing = [col for col in original_columns if col in upload_file_df.columns]
+                                final_upload_df = upload_file_df[final_columns_existing]
+                                
+                                upload_buffer = io.BytesIO()
+                                with pd.ExcelWriter(upload_buffer, engine='xlsxwriter') as writer:
+                                    final_upload_df.to_excel(writer, index=False, sheet_name='Updated_Bids')
+                                
+                                st.session_state.download_upload_file = upload_buffer.getvalue()
+                                st.success(f"Wygenerowano plik do wgrania z {len(final_upload_df)} zmianami. Pobieranie rozpocznie się za chwilę...")
+
+                            except Exception as e:
+                                st.error(f"Błąd podczas generowania pliku do wgrania: {e}")
+                                
+            if 'download_upload_file' in st.session_state and st.session_state.download_upload_file:
+                st.download_button(
+                    label="Pobierz plik (kliknij, jeśli nie pobrało się auto)",
+                    data=st.session_state.download_upload_file,
+                    file_name=f"upload_changes_{kraj}_{typ_kampanii}_{widok}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_upload_file_btn"
+                )
+                del st.session_state.download_upload_file 
+
+            with btn_cols[2]:
+                if st.button("✅ Zapisz zmiany do 'New Bid'", use_container_width=True, type="primary"):
+                    if grid_response['data'] is not None:
+                        updated_df = pd.DataFrame(grid_response['data'])
+                        st.session_state.manual_bid_updates = { "data": updated_df, "widok": widok, "kraj": kraj, "typ_kampanii": typ_kampanii, "cols_map": cols_map }
+                        st.success("Zmiany zapisane w pamięci! Przejdź do 'New Bid', aby wygenerować pełny plik.")
+                    else:
+                        st.warning("Brak danych w tabeli do zapisania.")
+            
         else:
             st.warning("Brak danych dla wybranego okresu lub filtrów.")
+# <--- KONIEC ZAKTUALIZOWANEJ ZAKŁADKI ---
 
+
+
+# <--- POCZĄTEK ZAKTUALIZOWANEJ ZAKŁADKI "New Bid" (z wykluczeniami) ---
+# PODMIEŃ CAŁY BLOK 'with tab2:' W SWOIM KODZIE
 with tab2:
     st.header("Automatycznie zaktualizowany plik z nowymi stawkami")
     st.info("Dane w tej tabeli są aktualizowane automatycznie na podstawie globalnie wybranego konta. Najpierw stosowane są reguły (zgodnie z priorytetem), a następnie nakładane są zapisane zmiany z Dashboardu.")
@@ -894,6 +1528,16 @@ with tab2:
     with nb_cols[1]:
         typ_kampanii_nb = st.selectbox("Typ kampanii", ["Sponsored Products", "Sponsored Brands", "Sponsored Display"], key="newbid_typ_4")
     
+    # --- NOWY BLOK: Wykluczenia ---
+    st.markdown("##### Wykluczenia")
+    exclusions_text = st.text_area(
+        "Wklej DOKŁADNE nazwy kampanii do wykluczenia (oddzielone przecinkiem):",
+        placeholder="Kampania A, Kampania B, Dokładna Nazwa Kampanii C...",
+        key=f"newbid_exclusions_{konto_nb}_{kraj_nb}_{typ_kampanii_nb}",
+        help="Wszystkie wiersze pasujące DOKŁADNIE do tych nazw zostaną usunięte z finalnego pliku do pobrania."
+    )
+    # --- KONIEC NOWEGO BLOKU ---
+
     state_key = f"{konto_nb}_{kraj_nb}_{typ_kampanii_nb}"
     
     gid_key = {"Sponsored Products": "SP_TYDZIEN", "Sponsored Brands": "SB_TYDZIEN", "Sponsored Display": "SD_TYDZIEN"}.get(typ_kampanii_nb)
@@ -915,12 +1559,22 @@ with tab2:
                 final_df_processed = df_with_rules
                 updates = st.session_state.get('manual_bid_updates')
 
-                if updates and updates['kraj'] == kraj_nb and updates['typ_kampanii'] == typ_kampanii_nb:
+                # Sprawdź, czy zapisane zmiany pasują (logika bez zmian)
+                # --- ZMIANA: Sprawdzamy też, czy zapisane zmiany nie są z "Wszystko" ---
+                if (updates and 
+                    (updates['kraj'] == kraj_nb or updates['kraj'] == "Wszystko") and 
+                    updates['typ_kampanii'] == typ_kampanii_nb):
+                # --- KONIEC ZMIANY ---
+
                     updates_df = updates['data']
                     source_cols_map = updates.get("cols_map", {})
                     widok_source = updates['widok']
                     
                     key_clean_names = ['Campaign']
+                    # --- ZMIANA: Dodajemy 'Kraj' jako klucz, jeśli zapis był z "Wszystko" ---
+                    if updates['kraj'] == "Wszystko":
+                        key_clean_names.append('Kraj')
+                    # --- KONIEC ZMIANY ---
 
                     if widok_source == 'Keyword': key_clean_names.extend(['Keyword text', 'Match type'])
                     elif widok_source in ['Product targeting', 'Audience targeting', 'Contextual targeting']: key_clean_names.append('Targeting expression')
@@ -955,7 +1609,8 @@ with tab2:
                             merged_df['Bid_new'] = merged_df['Bid_new_manual'].fillna(merged_df['Bid_new'])
                             final_df_processed = merged_df.drop(columns=['Bid_new_manual'])
                             st.success(f"Krok 2: Pomyślnie nałożono {len(updates_for_merge)} ręcznych zmian z Dashboardu.")
-
+                
+                # Ustaw 'Bid' na nową wartość (bez zmian)
                 final_df_processed['Bid'] = final_df_processed['Bid_new']
                 final_df_processed['Bid'] = final_df_processed['Bid'].apply(lambda x: '' if pd.isna(x) else str(x))
 
@@ -964,34 +1619,70 @@ with tab2:
                 final_df_processed['Operation'] = np.where(final_df_processed['Bid'].astype(str).str.strip().ne(''), 'Update', '')
                 if 'Operation' not in original_columns:
                     original_columns.append('Operation')
-
-                POTENTIAL_CAMPAIGN_COLS = ["Campaign name (Informational only)", "Campaign name", "Campaign"]
+                
+                # Znajdź kolumnę kampanii (bez zmian)
+                POTENTIAL_CAMPAIGN_COLS = ["Campaign name (Informational only)", "Campaign Name (Informational only)", "Campaign name", "Campaign Name", "Campaign"]
                 actual_campaign_col = find_first_existing_column(base_df_raw, POTENTIAL_CAMPAIGN_COLS)
                 if actual_campaign_col and '_Campaign_Standardized' in final_df_processed.columns:
                     final_df_processed.rename(columns={'_Campaign_Standardized': actual_campaign_col}, inplace=True)
                 
-                final_columns_existing = [col for col in original_columns if col in final_df_processed.columns]
-                final_df_for_download = final_df_processed[final_columns_existing]
+                # --- NOWY BLOK: Zastosowanie wykluczeń ---
+                final_df_for_download = final_df_processed.copy()
+                
+                if exclusions_text:
+                    # 1. Pobierz listę wykluczeń
+                    excluded_campaigns = [name.strip().lower() for name in exclusions_text.split(',') if name.strip()]
+                    
+                    if excluded_campaigns and actual_campaign_col in final_df_for_download.columns:
+                        # 2. Stwórz maskę do wykluczenia (isin sprawdza DOKŁADNE dopasowania)
+                        exclusion_mask = final_df_for_download[actual_campaign_col].astype(str).str.lower().isin(excluded_campaigns)
+                        
+                        # 3. Odwróć maskę (chcemy zatrzymać wszystko, co NIE jest na liście)
+                        final_df_for_download = final_df_for_download[~exclusion_mask]
+                        
+                        st.warning(f"Zastosowano wykluczenia. Usunięto {exclusion_mask.sum()} wierszy pasujących do {len(excluded_campaigns)} nazw kampanii.")
+                    elif not actual_campaign_col:
+                        st.error("Nie można zastosować wykluczeń: Nie znaleziono kolumny kampanii w pliku.")
+                # --- KONIEC NOWEGO BLOKU ---
+                
+                final_columns_existing = [col for col in original_columns if col in final_df_for_download.columns]
+                final_df_for_download = final_df_for_download[final_columns_existing]
+                
+                # Zapisz przefiltrowane dane do stanu sesji
                 st.session_state.new_bid_data[state_key] = final_df_for_download
+        
         except Exception as e:
             st.error(f"Wystąpił błąd podczas przetwarzania pliku New Bid: {e}")
-            import traceback
-            st.error(traceback.format_exc())
             
+    # Wyświetlanie danych (bez zmian)
     if state_key in st.session_state.new_bid_data:
         display_df = st.session_state.new_bid_data[state_key]
         
-        # =================================================================================
-        # === ZASTOSOWANIE POPRAWKI #2 (NEW BID) ===
-        # =================================================================================
-        display_df = convert_int_columns_to_float(display_df)
-        # =================================================================================
-
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        # Pokaż tylko wiersze ze zmianami, aby było czytelniej
+        display_df_changes_only = display_df[display_df['Operation'] == 'Update'].copy()
+        
+        if display_df_changes_only.empty:
+            st.info("Nie znaleziono żadnych automatycznych ani ręcznych zmian stawek dla tego widoku.")
+        else:
+            st.markdown(f"**Znaleziono {len(display_df_changes_only)} wierszy ze zmianami (po wykluczeniach):**")
+            # Użyj st.dataframe do szybkiego podglądu, a nie AgGrid
+            st.dataframe(display_df_changes_only, use_container_width=True, hide_index=True)
+        
+        # Przycisk pobierania zawsze używa pełnego DataFrame (w tym wierszy bez zmian, ale po wykluczeniach)
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
             display_df.to_excel(writer, index=False, sheet_name='Updated_Bids')
-        st.download_button(label="📥 Pobierz plik z nowymi stawkami (.xlsx)", data=buffer.getvalue(), file_name=f"NewBids_{kraj_nb}_{typ_kampanii_nb}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        
+        st.download_button(
+            label=f"📥 Pobierz plik z nowymi stawkami ({len(display_df)} wierszy)", 
+            data=buffer.getvalue(), 
+            file_name=f"NewBids_{kraj_nb}_{typ_kampanii_nb}.xlsx", 
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            type="primary"
+        )
+# <--- KONIEC ZAKTUALIZOWANEJ ZAKŁADKI "New Bid" ---
+
 
 with tab3:
     st.header("Wyszukiwarka Produktów")
@@ -1017,7 +1708,7 @@ with tab3:
                     for term in search_list:
                         term_mask = pd.Series([False] * len(account_df), index=account_df.index)
                         for col in existing_search_cols:
-                             term_mask = term_mask | account_df[col].str.lower().str.contains(term, na=False)
+                            term_mask = term_mask | account_df[col].str.lower().str.contains(term, na=False)
                         combined_mask = combined_mask | term_mask
                     
                     results_df = account_df[combined_mask]
@@ -1129,11 +1820,11 @@ with tab4:
                     else:
                         try:
                             uploaded_file.seek(0)
-                            df_upload = pd.read_csv(uploaded_file, sep=';', dtype=str)
+                            df_upload = pd.read_csv(uploaded_file, sep=';')
                             if df_upload.shape[1] < 2: raise ValueError("Niepoprawny separator")
                         except (Exception, pd.errors.ParserError):
                             uploaded_file.seek(0)
-                            df_upload = pd.read_csv(uploaded_file, sep=',', dtype=str)
+                            df_upload = pd.read_csv(uploaded_file, sep=',')
                     
                     final_rules_df = df_upload.copy()
                     if 'name' not in final_rules_df.columns:
@@ -1155,7 +1846,7 @@ with tab4:
                         bid_mask = final_rules_df['type'] == 'Bid'
                         final_rules_df.loc[bid_mask, 'value_type'] = 'Wpisz wartość'
                         final_rules_df.loc[bid_mask, 'color'] = 'Czerwony'
-                
+                        
                         highlight_mask = final_rules_df['type'] == 'Highlight'
                         final_rules_df.loc[highlight_mask, 'change'] = 0.0
                         final_rules_df.loc[highlight_mask, 'highlight_column'] = final_rules_df.loc[highlight_mask, 'highlight_column'].fillna(final_rules_df.loc[highlight_mask, 'metric'])
@@ -1233,3 +1924,405 @@ with tab4:
                 st.rerun()
             else:
                 st.warning("Nie zaznaczono żadnych wierszy do usunięcia.")
+
+
+# <--- POCZĄTEK ZAKTUALIZOWANEJ ZAKŁADKI ID ACOS (z filtrami ACOS/TACOS) ---
+# <--- POCZĄTEK ZAKTUALIZOWANEJ ZAKŁADKI ID ACOS (z opcją "Wszystko") ---
+# PODMIEŃ CAŁY BLOK 'with tab5:' W SWOIM KODZIE
+with tab5:
+    st.header("🎯 Analiza ACOS per ID (SKU)")
+
+    # --- FUNKCJA DO PODSUMOWANIA (bez zmian) ---
+    def calculate_acos_summary_row(df):
+        """Oblicza wiersz podsumowania dla tabeli ACOS."""
+        if df.empty:
+            return None
+
+        try:
+            numeric_cols_to_sum = ['Total Spend', 'Total Sales', 'Total Sales (Total)', 'Total Orders (Total)']
+            existing_numeric_cols = [col for col in numeric_cols_to_sum if col in df.columns]
+            sums = df[existing_numeric_cols].sum()
+
+            total_spend_sum = sums.get('Total Spend', 0)
+            total_sales_sum = sums.get('Total Sales', 0)
+            total_sales_total_sum = sums.get('Total Sales (Total)', 0)
+            total_orders_total_sum = sums.get('Total Orders (Total)', 0)
+
+            acos_summary = (total_spend_sum / total_sales_sum) if total_sales_sum > 0 else 0
+            tacos_summary = (total_spend_sum / total_sales_total_sum) if total_sales_total_sum > 0 else 0
+
+            summary_data = {
+                'ID': 'SUMA',
+                'nazwa': '',
+                'marka': '',
+                'kategoria': '',
+                'Total Spend': total_spend_sum,
+                'Total Sales': total_sales_sum,
+                'ACOS': acos_summary,
+                'Total Sales (Total)': total_sales_total_sum,
+                'Total Orders (Total)': total_orders_total_sum,
+                'TACOS': tacos_summary
+            }
+            return [summary_data] 
+        except KeyError as e:
+            st.warning(f"Brak kolumny do podsumowania: {e}. Wiersz sumy nie będzie wyświetlony.")
+            return None
+        except Exception as e:
+            st.error(f"Błąd podczas obliczania sumy: {e}")
+            return None
+    # --- KONIEC FUNKCJI PODSUMOWANIA ---
+
+    # Pobranie aktywnego konta
+    konto_acos = st.session_state.selected_account
+    KRAJE_MAPA_ACOS = ACCOUNTS_DATA[konto_acos]
+
+    st.info(f"Analiza dla konta: **{konto_acos}**. Wybierz kraj (lub 'Wszystko'), aby zobaczyć zagregowane dane dla każdego SKU. Suma na dole tabeli aktualizuje się dynamicznie.")
+
+    # --- FILTRY: Kraj i Okres ---
+    filter_cols = st.columns(2)
+    with filter_cols[0]:
+        # --- ZMIANA: Dodanie opcji "Wszystko" ---
+        kraje_lista = ["Wszystko"] + list(KRAJE_MAPA_ACOS.keys())
+        kraj_acos = st.selectbox("Wybierz kraj", kraje_lista, key="acos_kraj_selector")
+        # --- KONIEC ZMIANY ---
+    with filter_cols[1]:
+        okres_acos = st.radio("Przedział czasowy:", ["Tydzień", "Miesiąc"], key="acos_okres_selector", horizontal=True)
+
+    # Klucz unikalny dla tej kombinacji filtrów
+    grid_key_acos = f"acos_grid_{konto_acos}_{kraj_acos}_{okres_acos}"
+
+    with st.spinner(f"Agregowanie danych dla {kraj_acos} (Okres: {okres_acos})..."):
+        
+        # --- ZMIANA: Logika ładowania danych dla "Wszystko" ---
+        if kraj_acos == "Wszystko":
+            all_dfs = []
+            countries_to_load = list(KRAJE_MAPA_ACOS.keys()) # Załaduj wszystkie kraje zdefiniowane na koncie
+            
+            for country in countries_to_load:
+                df_country = load_and_aggregate_by_sku(konto_acos, country, okres_acos)
+                if not df_country.empty:
+                    all_dfs.append(df_country)
+            
+            if all_dfs:
+                # Połącz wszystkie ramki danych
+                combined_df = pd.concat(all_dfs, ignore_index=True)
+                
+                # Przeprowadź drugą agregację, aby zsumować dane dla tego samego ID z różnych krajów
+                numeric_cols = ['Total Spend', 'Total Sales', 'Total Sales (Total)', 'Total Orders (Total)']
+                
+                # Upewnij się, że wszystkie kolumny istnieją przed agregacją
+                existing_numeric = [col for col in numeric_cols if col in combined_df.columns]
+                
+                if 'ID' in combined_df.columns and existing_numeric:
+                    agg_rules = {col: 'sum' for col in existing_numeric}
+                    agg_rules['nazwa'] = 'first'
+                    agg_rules['marka'] = 'first'
+                    agg_rules['kategoria'] = 'first'
+
+                    # Usuń nieistniejące kolumny z zasad agregacji
+                    final_agg_rules = {k: v for k, v in agg_rules.items() if k in combined_df.columns}
+
+                    acos_df = combined_df.groupby('ID').agg(final_agg_rules).reset_index()
+
+                    # Przelicz ACOS i TACOS na podstawie globalnych sum
+                    acos_df['ACOS'] = np.where(
+                        acos_df['Total Sales'] > 0,
+                        acos_df['Total Spend'] / acos_df['Total Sales'],
+                        0
+                    )
+                    acos_df['TACOS'] = np.where(
+                        acos_df['Total Sales (Total)'] > 0,
+                        acos_df['Total Spend'] / acos_df['Total Sales (Total)'],
+                        0
+                    )
+                    
+                    # Ustawienie kolejności kolumn
+                    final_cols = ['ID', 'nazwa', 'marka', 'kategoria', 'Total Spend', 'Total Sales', 'ACOS', 'Total Sales (Total)', 'Total Orders (Total)', 'TACOS']
+                    existing_final_cols = [col for col in final_cols if col in acos_df.columns]
+                    acos_df = acos_df[existing_final_cols]
+                else:
+                    acos_df = pd.DataFrame() # Pusta ramka, jeśli brakuje ID lub kolumn numerycznych
+            else:
+                acos_df = pd.DataFrame() # Pusta ramka, jeśli nie załadowano żadnych danych
+        else:
+            # Oryginalna logika dla pojedynczego kraju
+            acos_df = load_and_aggregate_by_sku(konto_acos, kraj_acos, okres_acos)
+        # --- KONIEC ZMIANY ---
+
+        if acos_df.empty:
+            st.warning(f"Brak danych (SKU, Spend, Sales) do zagregowania dla konta {konto_acos}, kraju '{kraj_acos}' i okresu '{okres_acos}'.")
+        else:
+            st.markdown(f"### Znaleziono **{len(acos_df)}** unikalnych ID (SKU) dla **{kraj_acos}** (Okres: {okres_acos})")
+
+            # --- FILTRY ACOS / TACOS (bez zmian) ---
+            st.markdown("---")
+            st.markdown("<h4 style='font-weight: 600; color: #333; margin-bottom: 10px;'>Filtrowanie tabeli</h4>", unsafe_allow_html=True)
+            
+            filter_cols_acos_main = st.columns(2)
+            
+            with filter_cols_acos_main[0]:
+                f_acos_cols = st.columns([1, 1.5, 1.4]) 
+                f_acos_cols[0].markdown("<p class='filter-label' style='text-align: left; margin-top: 8px;'>ACOS</p>", unsafe_allow_html=True)
+                acos_op = f_acos_cols[1].selectbox("ACOS Op", ["Brak", ">", "<", "="], key="acos_tab_op", label_visibility="collapsed")
+                acos_val_str = f_acos_cols[2].text_input("ACOS Val", key="acos_tab_val", placeholder="Wpisz wartość %", label_visibility="collapsed")
+
+            with filter_cols_acos_main[1]:
+                f_tacos_cols = st.columns([1, 1.5, 1.4]) 
+                f_tacos_cols[0].markdown("<p class='filter-label' style='text-align: left; margin-top: 8px;'>TACOS</p>", unsafe_allow_html=True)
+                tacos_op = f_tacos_cols[1].selectbox("TACOS Op", ["Brak", ">", "<", "="], key="tacos_tab_op", label_visibility="collapsed")
+                tacos_val_str = f_tacos_cols[2].text_input("TACOS Val", key="tacos_tab_val", placeholder="Wpisz wartość %", label_visibility="collapsed")
+            
+            st.markdown("---") 
+
+            # Zastosuj filtrowanie do acos_df *PRZED* przekazaniem do AgGrid
+            if acos_op != "Brak" and acos_val_str:
+                try:
+                    val = float(acos_val_str.replace(',', '.')) / 100.0 
+                    if 'ACOS' in acos_df.columns:
+                        if acos_op == ">":
+                            acos_df = acos_df[acos_df['ACOS'] > val]
+                        elif acos_op == "<":
+                            acos_df = acos_df[acos_df['ACOS'] < val]
+                        elif acos_op == "=":
+                            acos_df = acos_df[np.isclose(acos_df['ACOS'], val)]
+                    else:
+                        st.warning("Kolumna 'ACOS' nie jest dostępna do filtrowania.")
+                except (ValueError, TypeError):
+                    st.warning(f"Niepoprawna wartość dla ACOS: '{acos_val_str}'. Wpisz liczbę.")
+            
+            if tacos_op != "Brak" and tacos_val_str:
+                try:
+                    val = float(tacos_val_str.replace(',', '.')) / 100.0
+                    if 'TACOS' in acos_df.columns:
+                        if tacos_op == ">":
+                            acos_df = acos_df[acos_df['TACOS'] > val]
+                        elif tacos_op == "<":
+                            acos_df = acos_df[acos_df['TACOS'] < val]
+                        elif tacos_op == "=":
+                            acos_df = acos_df[np.isclose(acos_df['TACOS'], val)]
+                    else:
+                        st.warning("Kolumna 'TACOS' nie jest dostępna do filtrowania.")
+                except (ValueError, TypeError):
+                    st.warning(f"Niepoprawna wartość dla TACOS: '{tacos_val_str}'. Wpisz liczbę.")
+            # --- KONIEC FILTRÓW ---
+
+            gb_acos = GridOptionsBuilder.from_dataframe(acos_df) 
+            # --- ZMIANA: Waluta dla "Wszystko" ---
+            # Jeśli Polska jest jedynym krajem, użyj PLN. W przeciwnym razie (w tym dla "Wszystko") użyj EUR.
+            currency_symbol = 'PLN' if kraj_acos == 'Polska' else 'EUR'
+            # --- KONIEC ZMIANY ---
+
+            # Formattery JS (bez zmian)
+            formatter_js_currency = JsCode(f"""function(params){{if(params.value==null||isNaN(params.value))return'';return params.value.toLocaleString('pl-PL',{{style:'currency',currency:'{currency_symbol}',maximumFractionDigits:2}})}}""")
+            formatter_js_percent = JsCode("""function(params){if(params.value==null||isNaN(params.value))return'';return params.value.toLocaleString('pl-PL',{style:'percent', minimumFractionDigits:2, maximumFractionDigits:2})}""")
+            formatter_js_integer = JsCode("""function(params){if(params.value==null||isNaN(params.value))return'';return Math.round(params.value).toLocaleString('pl-PL')}""")
+
+            # Konfiguracja kolumn (bez zmian)
+            gb_acos.configure_column("ID", header_name="ID (SKU)", width=200, filter='agTextColumnFilter', pinned='left')
+            gb_acos.configure_column("nazwa", header_name="Nazwa produktu", width=300, filter='agTextColumnFilter')
+            gb_acos.configure_column("marka", header_name="Marka", width=150, filter='agTextColumnFilter')
+            gb_acos.configure_column("kategoria", header_name="Kategoria", width=150, filter='agTextColumnFilter')
+            gb_acos.configure_column("Total Spend", header_name="Spend (Reklama)", type=["numericColumn","rightAligned"], valueFormatter=formatter_js_currency, width=180, sort='desc')
+            gb_acos.configure_column("Total Sales", header_name="Sales (Reklama)", type=["numericColumn","rightAligned"], valueFormatter=formatter_js_currency, width=180)
+            gb_acos.configure_column("ACOS", header_name="ACOS", type=["numericColumn","rightAligned"], valueFormatter=formatter_js_percent, width=150)
+            gb_acos.configure_column("Total Sales (Total)", header_name="Total Sales (Łącznie)", type=["numericColumn","rightAligned"], valueFormatter=formatter_js_currency, width=180)
+            gb_acos.configure_column("Total Orders (Total)", header_name="Total Orders (Łącznie)", type=["numericColumn","rightAligned"], valueFormatter=formatter_js_integer, width=180)
+            gb_acos.configure_column("TACOS", header_name="TACOS", type=["numericColumn","rightAligned"], valueFormatter=formatter_js_percent, width=150)
+
+            # Logika dynamicznej sumy (bez zmian)
+            if 'current_acos_grid_key' not in st.session_state or st.session_state.current_acos_grid_key != grid_key_acos:
+                st.session_state.current_acos_grid_key = grid_key_acos
+                st.session_state.pinned_acos_row = calculate_acos_summary_row(acos_df)
+                st.session_state.acos_grid_state = {} 
+
+            js_function_body = f"""
+                if (params.node.rowPinned) {{
+                    return {{'fontWeight': 'bold', 'backgroundColor': '#f0f2f6'}};
+                }}
+                return null;
+            """
+            cell_style_jscode = JsCode(f"function(params) {{{js_function_body}}}")
+
+            gb_acos.configure_default_column(resizable=True, filterable=True, sortable=True, cellStyle=cell_style_jscode)
+            grid_options_acos = gb_acos.build()
+            grid_options_acos['pinnedBottomRowData'] = st.session_state.get('pinned_acos_row', None)
+            
+            # Wyświetlanie siatki (bez zmian)
+            grid_response_acos = AgGrid(
+                acos_df, 
+                gridOptions=grid_options_acos,
+                width="100%",
+                height=600,
+                allow_unsafe_jscode=True,
+                theme='ag-theme-alpine',
+                key=grid_key_acos,
+                update_mode=GridUpdateMode.MODEL_CHANGED | GridUpdateMode.FILTERING_CHANGED | GridUpdateMode.SORTING_CHANGED,
+                enable_enterprise_modules=True
+            )
+
+            # Logika aktualizacji sumy (bez zmian)
+            if grid_response_acos['data'] is not None:
+                df_filtered_acos = pd.DataFrame(grid_response_acos['data'])
+                newly_calculated_acos_row = calculate_acos_summary_row(df_filtered_acos)
+                if newly_calculated_acos_row != st.session_state.get('pinned_acos_row', None):
+                    st.session_state.pinned_acos_row = newly_calculated_acos_row
+                    st.rerun() 
+
+            st.markdown("---")
+            # Logika pobierania Excela (bez zmian)
+            buffer_acos = io.BytesIO()
+            with pd.ExcelWriter(buffer_acos, engine='xlsxwriter') as writer:
+                if 'df_filtered_acos' in locals():
+                    df_to_export = df_filtered_acos
+                else: 
+                    df_to_export = acos_df
+
+                df_to_export.to_excel(writer, index=False, sheet_name='ACOS_Data')
+                workbook, worksheet = writer.book, writer.sheets['ACOS_Data']
+
+                currency_format = workbook.add_format({'num_format': f'#,##0.00 "{currency_symbol}"'});
+                percent_format = workbook.add_format({'num_format': '0.00%'});
+                integer_format = workbook.add_format({'num_format': '#,##0'});
+
+                worksheet.set_column('A:A', 25) # ID
+                worksheet.set_column('B:B', 40) # nazwa
+                worksheet.set_column('C:C', 20) # marka
+                worksheet.set_column('D:D', 20) # kategoria
+                worksheet.set_column('E:E', 18, currency_format) # Total Spend
+                worksheet.set_column('F:F', 18, currency_format) # Total Sales
+                worksheet.set_column('G:G', 12, percent_format) # ACOS
+                worksheet.set_column('H:H', 18, currency_format) # Total Sales (Total)
+                worksheet.set_column('I:I', 18, integer_format) # Total Orders (Total)
+                worksheet.set_column('J:J', 12, percent_format) # TACOS
+
+            st.download_button(
+                label="📥 Pobierz widoczne dane ACOS (Excel)", 
+                data=buffer_acos,
+                file_name=f"acos_data_{konto_acos}_{kraj_acos}_{okres_acos}_filtered.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+# <--- KONIEC ZAKTUALIZOWANEJ ZAKŁADKI ID ACOS ---
+
+with tab6:
+    st.header("Find Product 2 (Wyszukiwarka SKU i Kampanii)")
+    st.info("""
+    Wyszukaj produkty w centralnej bazie (po ID, SKU, ASIN, Nazwie, Marce, Kategorii). 
+    Aplikacja znajdzie wszystkie pasujące produkty, a następnie wyświetli **każdą kampanię reklamową** (ze wszystkich kont i krajów), w której te produkty (SKU) występują.
+    """)
+
+    try:
+        # 1. Ładujemy obie bazy danych
+        with st.spinner("Ładowanie mapy kampanii (ze wszystkich kont)..."):
+            campaign_map_df = build_dynamic_product_map()
+        
+        with st.spinner("Ładowanie centralnej bazy produktów (Marka, Kategoria)..."):
+            product_details_df = load_product_details()
+
+        if campaign_map_df.empty or product_details_df.empty:
+            st.warning("Nie można załadować danych. Mapa kampanii lub centralna baza produktów są puste.")
+        
+        else:
+            # 2. Pole wyszukiwania
+            search_term_tab6 = st.text_input("Wpisz frazy (oddzielone przecinkiem):", key="tab6_search_input_v3") # Zmieniony klucz
+
+            if search_term_tab6:
+                search_terms_list = [term.strip().lower() for term in search_term_tab6.split(',') if term.strip()]
+                
+                if not search_terms_list:
+                    st.info("Wpisz frazę, aby rozpocząć wyszukiwanie.")
+                
+                else:
+                    # --- NOWA LOGIKA WYSZUKIWANIA ---
+
+                    # 3. Krok A: Wyszukaj pasujących produktów w centralnej bazie (nazwa, marka, kategoria, SKU, ASIN)
+                    search_cols_details = ['SKU', 'ASIN', 'nazwa', 'marka', 'kategoria']
+                    mask_details = pd.Series(False, index=product_details_df.index)
+                    for term_lower in search_terms_list:
+                        for col in search_cols_details:
+                            if col in product_details_df.columns:
+                                mask_details = mask_details | product_details_df[col].astype(str).str.lower().str.contains(term_lower, na=False)
+                    
+                    found_in_details = product_details_df[mask_details]
+                    
+                    # 4. Krok B: Wyszukaj pasujących produktów w mapie kampanii (tylko po SKU i ASIN)
+                    search_cols_campaign_map = ['SKU', 'ASIN']
+                    mask_campaign = pd.Series(False, index=campaign_map_df.index)
+                    for term_lower in search_terms_list:
+                         for col in search_cols_campaign_map:
+                            if col in campaign_map_df.columns:
+                                mask_campaign = mask_campaign | campaign_map_df[col].astype(str).str.lower().str.contains(term_lower, na=False)
+                    
+                    found_in_campaign_map = campaign_map_df[mask_campaign]
+
+                    # 5. Krok C: Zbierz unikalną listę wszystkich pasujących SKU z obu wyszukiwań
+                    sku_list_from_details = set(found_in_details['SKU'].unique())
+                    sku_list_from_campaign_map = set(found_in_campaign_map['SKU'].unique())
+                    
+                    final_sku_list = list(sku_list_from_details.union(sku_list_from_campaign_map))
+                    
+                    if not final_sku_list:
+                        st.warning(f"Nie znaleziono żadnych SKU pasujących do: '{', '.join(search_terms_list)}'")
+                    else:
+                        # 6. Krok D: Użyj listy SKU, aby wyfiltrować *wszystkie* powiązane kampanie
+                        results_df_tab6 = campaign_map_df[campaign_map_df['SKU'].isin(final_sku_list)].copy()
+
+                        # 7. Krok E: Połącz znalezione kampanie z danymi z centralnej bazy, aby je wzbogacić
+                        details_to_merge = product_details_df[['SKU', 'nazwa', 'marka', 'kategoria']].drop_duplicates(subset=['SKU'])
+                        
+                        final_display_df = pd.merge(
+                            results_df_tab6,
+                            details_to_merge,
+                            on='SKU',
+                            how='left'
+                        )
+                        
+                        # Wypełnij braki, jeśli SKU z kampanii nie było w centralnej bazie
+                        final_display_df[['nazwa', 'marka', 'kategoria']] = final_display_df[['nazwa', 'marka', 'kategoria']].fillna('')
+
+                        st.markdown(f"**Znaleziono {len(final_display_df)} powiązanych wierszy kampanii dla pasujących SKU.**")
+
+                        # 8. Definiujemy i filtrujemy ostateczne kolumny do wyświetlenia
+                        display_cols_order = [
+                            'SKU', 'nazwa', 'marka', 'kategoria', 
+                            'Account', 'Country', 'Campaign', 'ASIN',
+                            'Campaign Type', 'Targeting Type', 'Price', 'Quantity'
+                        ]
+                        
+                        existing_display_cols = [col for col in display_cols_order if col in final_display_df.columns]
+                        final_display_df = final_display_df[existing_display_cols].drop_duplicates()
+
+                        # 9. Wyświetlanie AgGrid
+                        gb_tab6 = GridOptionsBuilder.from_dataframe(final_display_df)
+                        gb_tab6.configure_default_column(resizable=True, filterable=True, sortable=True, autoHeaderHeight=True, wrapText=True)
+                        
+                        # Konfiguracja kolumn
+                        if 'SKU' in final_display_df.columns: gb_tab6.configure_column("SKU", pinned='left', width=150)
+                        if 'nazwa' in final_display_df.columns: gb_tab6.configure_column("nazwa", header_name="Nazwa Produktu", pinned='left', width=300)
+                        if 'marka' in final_display_df.columns: gb_tab6.configure_column("marka", header_name="Marka", width=150)
+                        if 'kategoria' in final_display_df.columns: gb_tab6.configure_column("kategoria", header_name="Kategoria", width=150)
+                        if 'Account' in final_display_df.columns: gb_tab6.configure_column("Account", width=120)
+                        if 'Country' in final_display_df.columns: gb_tab6.configure_column("Country", width=120)
+                        if 'Campaign' in final_display_df.columns: gb_tab6.configure_column("Campaign", width=350)
+                        if 'ASIN' in final_display_df.columns: gb_tab6.configure_column("ASIN", width=150)
+                        if 'Price' in final_display_df.columns: gb_tab6.configure_column("Price", header_name="Cena", type=["numericColumn","rightAligned"], width=100)
+                        if 'Quantity' in final_display_df.columns: gb_tab6.configure_column("Quantity", header_name="Ilość", type=["numericColumn","rightAligned"], width=100)
+
+                        grid_options_tab6 = gb_tab6.build()
+                        
+                        AgGrid(
+                            final_display_df, 
+                            gridOptions=grid_options_tab6, 
+                            height=600, 
+                            width='100%', 
+                            allow_unsafe_jscode=True, 
+                            theme='ag-theme-alpine', 
+                            key='find_product_2_grid_v3', # Zmieniony klucz
+                            enable_enterprise_modules=True
+                        )
+            else:
+                st.info("Wpisz frazę (np. nazwę, SKU, kategorię), aby znaleźć produkt i powiązane z nim kampanie.")
+
+    except Exception as e:
+        st.error(f"Wystąpił krytyczny błąd w zakładce 'Find Product 2': {e}")
+        st.exception(e) # Dodaje pełny traceback błędu
